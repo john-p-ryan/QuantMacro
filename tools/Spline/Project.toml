@@ -1,0 +1,7 @@
+name = "Spline"
+uuid = "1f2a299f-b7b0-4005-ae43-64b7887ebddb"
+authors = ["John Ryan <johnryan6465@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
