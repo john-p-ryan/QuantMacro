@@ -197,12 +197,61 @@ function bellman_two_step!(V_new, pol_k, pol_b, pol_c,
     # Step 3: Maximize over k' to get updated V and policies
     # ──────────────────────────────────────────────────────────
 
-    # Splines of V_NA and b_pol_NA in the b_wide dimension
+    # Build splines of V_NA and b_pol_NA, excluding infeasible points
+    # (c_NA ≤ 0) to prevent -1e10 penalty values from corrupting
+    # interpolation. Add refinement points near the feasibility boundary
+    # to improve spline accuracy in the critical transition region.
     V_NA_spl  = Matrix{PchipSplineInterpolation}(undef, n_k, n_z)
     bp_NA_spl = Matrix{PchipSplineInterpolation}(undef, n_k, n_z)
     for iz in 1:n_z, ik in 1:n_k
-        V_NA_spl[ik, iz]  = PchipSpline(g.b_wide_grid, V_NA[ik, :, iz])
-        bp_NA_spl[ik, iz] = PchipSpline(g.b_wide_grid, b_pol_NA[ik, :, iz])
+        income_k = (p.R_k - 1) * g.k_grid[ik] + g.z_vals[iz]
+
+        # Find first feasible wide grid point
+        i_feas = 1
+        for i_bw in 1:n_bw
+            if c_NA[ik, i_bw, iz] > 0.0
+                i_feas = i_bw
+                break
+            end
+        end
+
+        # Feasibility boundary: c = 0 when bw = (b_min - income) / R_b
+        bw_feas = (p.b_min - income_k) / p.R_b
+        bw_first = g.b_wide_grid[i_feas]
+        gap = bw_first - bw_feas
+
+        if gap > 0.01
+            # Add refinement points between boundary and first grid point
+            # to give the spline accurate data in the transition region
+            ev_bmin = 0.0
+            for iz′ in 1:n_z
+                ev_bmin += g.Π[iz, iz′] * V[ik, 1, iz′]
+            end
+            fracs = [0.02, 0.1, 0.25, 0.5, 0.75]
+            n_extra = length(fracs)
+            extra_bw  = Vector{Float64}(undef, n_extra)
+            extra_VNA = Vector{Float64}(undef, n_extra)
+            extra_bp  = fill(p.b_min, n_extra)
+            for (j, f) in enumerate(fracs)
+                bw_pt = bw_feas + f * gap
+                c_pt  = income_k + p.R_b * bw_pt - p.b_min
+                extra_bw[j]  = bw_pt
+                extra_VNA[j] = u(c_pt, p.σ) + p.β * ev_bmin
+            end
+            # Merge extra points with feasible grid points
+            feas_bw  = g.b_wide_grid[i_feas:end]
+            feas_VNA = V_NA[ik, i_feas:end, iz]
+            feas_bp  = b_pol_NA[ik, i_feas:end, iz]
+            all_bw  = vcat(extra_bw, feas_bw)
+            all_VNA = vcat(extra_VNA, feas_VNA)
+            all_bp  = vcat(extra_bp, feas_bp)
+            V_NA_spl[ik, iz]  = PchipSpline(all_bw, all_VNA)
+            bp_NA_spl[ik, iz] = PchipSpline(all_bw, all_bp)
+        else
+            bw_sub = g.b_wide_grid[i_feas:end]
+            V_NA_spl[ik, iz]  = PchipSpline(bw_sub, V_NA[ik, i_feas:end, iz])
+            bp_NA_spl[ik, iz] = PchipSpline(bw_sub, b_pol_NA[ik, i_feas:end, iz])
+        end
     end
 
     # For each candidate k', batch-evaluate V_NA at all (k, b) pairs
@@ -225,8 +274,7 @@ function bellman_two_step!(V_new, pol_k, pol_b, pol_c,
                 end
             end
             vals = evaluate_spline(V_NA_spl[ik′, i_z], b_star_vec)
-            # Reshape: vals is ordered (i_k fast, i_b slow)
-            # Mark infeasible choices (resources < b_min ⟹ c < 0) as -Inf
+            # Mark infeasible choices (resources ≤ b_min ⟹ c ≤ 0) as -Inf
             @inbounds for i_b in 1:n_b, i_k in 1:n_k
                 resources = p.R_k * g.k_grid[i_k] + p.R_b * g.b_grid[i_b] +
                             g.z_vals[i_z] - k′ - adj_cost(g.k_grid[i_k], k′, p.χ)
@@ -314,15 +362,13 @@ function solve_vfi(p::Params, g::Grids; tol = 1e-6, max_iter = 1000, verbose = t
             println("Iter $iter, ||V_new - V|| = $err")
         end
 
-        if err < tol
-            verbose && println("Converged in $iter iterations (err = $err)")
-            copy!(V, V_new)
-            c_pol .= pol_c
-            break
-        end
-
         copy!(V, V_new)
         c_pol .= pol_c
+
+        if err < tol
+            verbose && println("Converged in $iter iterations (err = $err)")
+            break
+        end
 
         if iter == max_iter
             @warn "VFI did not converge after $max_iter iterations (err = $err)"
