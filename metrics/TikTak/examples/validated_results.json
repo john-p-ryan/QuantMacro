@@ -1,0 +1,53 @@
+{
+  "environment": {
+    "python": "3.14.6",
+    "numpy": "2.5.3",
+    "scipy": "1.18.1",
+    "pytest": "9.1.1",
+    "platform": "Darwin",
+    "workers": 2
+  },
+  "tests_passed": 27,
+  "examples": {
+    "quadratic": {
+      "x": [
+        0.1999999999999993,
+        -0.39999999999999936
+      ],
+      "fun": 9.645057161491277e-31,
+      "n_evals": 88,
+      "n_failed": 0,
+      "status": "completed"
+    },
+    "rastrigin": {
+      "x": [
+        -2.4866720726990366e-06,
+        1.1150220569078328e-07
+      ],
+      "fun": 1.2292318274376157e-09,
+      "n_evals": 1136,
+      "n_failed": 0,
+      "status": "completed"
+    },
+    "ar1_moments": {
+      "x": [
+        0.6499999994069805,
+        0.20000000021974584
+      ],
+      "fun": 1.672164778220776e-18,
+      "n_evals": 465,
+      "n_failed": 0,
+      "status": "completed"
+    },
+    "rough_holes": {
+      "x": [
+        0.590826198644449,
+        0.2961885500693582
+      ],
+      "fun": 0.0,
+      "n_evals": 839,
+      "n_failed": 75,
+      "status": "completed"
+    }
+  }
+}
