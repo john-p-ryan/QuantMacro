@@ -7,6 +7,7 @@ using LinearAlgebra
 export CubicSpline, CubicSplineInterpolation,
        LinearSpline, LinearSplineInterpolation,
        PchipSpline, PchipSplineInterpolation,
+       HymanSpline, HymanSplineInterpolation,
        BilinearSpline, BilinearSplineInterpolation,
        evaluate_spline, evaluate_spline_derivative, evaluate_spline_antiderivative,
        evaluate_spline!, evaluate_spline_derivative!, evaluate_spline_antiderivative!,
@@ -49,6 +50,43 @@ function _cumulative_integral(x, a, b, c, d)
         I[i] = I[i-1] + a[i-1] * h + b[i-1] * h^2 / 2 + c[i-1] * h^3 / 3 + d[i-1] * h^4 / 4
     end
     return I
+end
+
+# Segment coefficients of the cubic Hermite interpolant with knot slopes `m`:
+# on [x[i], x[i+1]] the cubic is y[i] + b*dx + c*dx^2 + d*dx^3.
+function _hermite_coeffs(h, delta, m)
+    T = promote_type(eltype(h), eltype(delta), eltype(m))
+    n = length(m)
+    b = zeros(T, n - 1)
+    c = zeros(T, n - 1)
+    d = zeros(T, n - 1)
+    for i = 1:n-1
+        b[i] = m[i]
+        c[i] = (3 * delta[i] - 2 * m[i] - m[i+1]) / h[i]
+        d[i] = (m[i] + m[i+1] - 2 * delta[i]) / (h[i] * h[i])
+    end
+    return b, c, d
+end
+
+# Hyman (1983) filter. Clamps the knot slopes `m` so that every interval
+# satisfies the Fritsch-Carlson sufficient condition for monotonicity,
+# 0 <= m[i]/delta[i] <= 3 and 0 <= m[i+1]/delta[i] <= 3. Knots at which the
+# secant slopes change sign (local extrema) or vanish (flat segments) get a
+# zero slope; slopes already inside the region are left untouched.
+function _hyman_filter!(m, delta)
+    n = length(m)
+    for i = 1:n
+        # Secants on either side of the knot; the endpoints see one interval only.
+        dl = delta[max(i - 1, 1)]
+        dr = delta[min(i, n - 1)]
+        if dl * dr > 0
+            s = sign(dr)
+            m[i] = s * clamp(s * m[i], zero(m[i]), 3 * min(abs(dl), abs(dr)))
+        else
+            m[i] = zero(m[i])
+        end
+    end
+    return m
 end
 
 # Tridiagonal system for the interior second derivatives of a cubic spline.
@@ -104,8 +142,13 @@ end
 
 # --- Cubic Spline Implementation ---
 
+# Piecewise cubics stored as per-interval (a, b, c, d) with cubic extrapolation.
+# `CubicSplineInterpolation` and `HymanSplineInterpolation` share the
+# `evaluate_spline*` methods below through this supertype.
+abstract type AbstractCubicSplineInterpolation end
+
 # Define the Spline object to store spline information
-struct CubicSplineInterpolation
+struct CubicSplineInterpolation <: AbstractCubicSplineInterpolation
     x::Vector{Float64}
     y::Vector{Float64}
     a::Vector{Float64} # a[i] = y[i]
@@ -196,17 +239,18 @@ end
 
 """
     evaluate_spline(spline::CubicSplineInterpolation, new_x::Vector{Float64})
+    evaluate_spline(spline::HymanSplineInterpolation, new_x::Vector{Float64})
 
 Evaluates the cubic spline interpolation at new x values.
 
 # Arguments
-- `spline`: A CubicSplineInterpolation object.
+- `spline`: A CubicSplineInterpolation or HymanSplineInterpolation object.
 - `new_x`: Array of new x-coordinates at which to evaluate the spline.
 
 # Returns
 - Array of interpolated y-values at the new x-coordinates.
 """
-function evaluate_spline!(results::Vector{Float64}, spline::CubicSplineInterpolation, new_x::Vector{Float64})
+function evaluate_spline!(results::Vector{Float64}, spline::AbstractCubicSplineInterpolation, new_x::Vector{Float64})
     _check_out(results, new_x)
     n = length(spline.x)
 
@@ -223,25 +267,26 @@ function evaluate_spline!(results::Vector{Float64}, spline::CubicSplineInterpola
     return results
 end
 
-evaluate_spline(spline::CubicSplineInterpolation, new_x::Vector{Float64}) =
+evaluate_spline(spline::AbstractCubicSplineInterpolation, new_x::Vector{Float64}) =
     evaluate_spline!(zeros(Float64, length(new_x)), spline, new_x)
 
 
 
 """
     evaluate_spline_derivative(spline::CubicSplineInterpolation, new_x::Vector{Float64})
+    evaluate_spline_derivative(spline::HymanSplineInterpolation, new_x::Vector{Float64})
 
 Evaluates the derivative of the cubic spline interpolation at new x values,
 consistent with cubic extrapolation when extrapolate=true.
 
 # Arguments
-- `spline`: A CubicSplineInterpolation object.
+- `spline`: A CubicSplineInterpolation or HymanSplineInterpolation object.
 - `new_x`: Array of new x-coordinates at which to evaluate the derivative of the spline.
 
 # Returns
 - Array of derivative values at the new x-coordinates.
 """
-function evaluate_spline_derivative!(results::Vector{Float64}, spline::CubicSplineInterpolation, new_x::Vector{Float64})
+function evaluate_spline_derivative!(results::Vector{Float64}, spline::AbstractCubicSplineInterpolation, new_x::Vector{Float64})
     _check_out(results, new_x)
     n = length(spline.x)
 
@@ -257,18 +302,19 @@ function evaluate_spline_derivative!(results::Vector{Float64}, spline::CubicSpli
     return results
 end
 
-evaluate_spline_derivative(spline::CubicSplineInterpolation, new_x::Vector{Float64}) =
+evaluate_spline_derivative(spline::AbstractCubicSplineInterpolation, new_x::Vector{Float64}) =
     evaluate_spline_derivative!(zeros(Float64, length(new_x)), spline, new_x)
 
 
 
 """
     evaluate_spline_antiderivative(spline::CubicSplineInterpolation, new_x::Vector{Float64}; C::Float64=0.0)
+    evaluate_spline_antiderivative(spline::HymanSplineInterpolation, new_x::Vector{Float64}; C::Float64=0.0)
 
 Evaluates the antiderivative (indefinite integral) of the cubic spline.
 
 # Arguments
-- `spline`: A `CubicSplineInterpolation` object.
+- `spline`: A `CubicSplineInterpolation` or `HymanSplineInterpolation` object.
 - `new_x`:  A vector of x-values at which to evaluate the antiderivative.
 - `C`: The constant of integration. Defaults to the negative of the antiderivative evaluated at spline.x[1].
 
@@ -282,7 +328,7 @@ antiderivative is zero at the *first* knot point (`spline.x[1]`). Extrapolation
 behavior is controlled by the `spline.extrapolate` setting.
 
 """
-function evaluate_spline_antiderivative!(results::Vector{Float64}, spline::CubicSplineInterpolation, new_x::Vector{Float64}; C::Float64=NaN)
+function evaluate_spline_antiderivative!(results::Vector{Float64}, spline::AbstractCubicSplineInterpolation, new_x::Vector{Float64}; C::Float64=NaN)
     _check_out(results, new_x)
     n = length(spline.x)
 
@@ -303,7 +349,7 @@ function evaluate_spline_antiderivative!(results::Vector{Float64}, spline::Cubic
     return results
 end
 
-evaluate_spline_antiderivative(spline::CubicSplineInterpolation, new_x::Vector{Float64}; C::Float64=NaN) =
+evaluate_spline_antiderivative(spline::AbstractCubicSplineInterpolation, new_x::Vector{Float64}; C::Float64=NaN) =
     evaluate_spline_antiderivative!(zeros(Float64, length(new_x)), spline, new_x; C=C)
 
 
@@ -368,6 +414,78 @@ function safe_spline(x, y, x_new)
     T = promote_type(eltype(x), eltype(y), eltype(x_new))
     return T[_spline_value(x, y, b, c, d, xq) for xq in x_new]
 end
+
+
+
+# --- Hyman-filtered Cubic Spline Implementation ---
+
+struct HymanSplineInterpolation <: AbstractCubicSplineInterpolation
+    x::Vector{Float64}
+    y::Vector{Float64}
+    m::Vector{Float64}  # Filtered slopes at each knot
+    a::Vector{Float64}  # a[i] = y[i]
+    b::Vector{Float64}  # Coefficients for (x-x[i])
+    c::Vector{Float64}  # Coefficients for (x-x[i])^2
+    d::Vector{Float64}  # Coefficients for (x-x[i])^3
+    I::Vector{Float64}  # Cumulative integral at each knot (for antiderivatives)
+    bc_type::String
+    extrapolate::Bool
+end
+
+"""
+    HymanSpline(x, y; bc_type="not-a-knot", extrapolate=true)
+
+Constructs a HymanSplineInterpolation object: a cubic spline whose knot slopes
+have been passed through the Hyman (1983) monotonicity filter.
+
+The knot derivatives of the ordinary cubic spline (`CubicSpline` with the same
+`bc_type`) are clamped so that on every interval `[x[i], x[i+1]]` the
+Fritsch-Carlson sufficient condition for monotonicity holds:
+`0 <= m[i]/delta[i] <= 3` and `0 <= m[i+1]/delta[i] <= 3`, where `delta[i]` is
+the secant slope. Knots where the data has a local extremum get a zero slope.
+The filtered slopes then define a piecewise cubic Hermite interpolant, which is
+C¹ and monotone wherever the data is monotone.
+
+On every interval whose two knot slopes pass the filter unchanged, the result
+coincides with the cubic spline. In particular, if the cubic spline already
+satisfies the condition at every knot, the two are identical. The condition is
+sufficient but not necessary, so a monotone cubic spline can still be modified
+if a knot slope exceeds three times the neighbouring secant slope.
+
+# Arguments
+- `x`: Array of x-coordinates of data points. Must be strictly increasing.
+- `y`: Array of y-coordinates of data points. Must be the same length as x.
+- `bc_type`: Boundary condition of the underlying cubic spline. Can be "natural",
+             "clamped", or "not-a-knot". Defaults to "not-a-knot".
+- `extrapolate`: Boolean indicating whether to extrapolate for x values outside the
+                 range of the input x data. Defaults to true. Extrapolation is
+                 cubic, using the end intervals, as for `CubicSpline`.
+
+# Returns
+- A HymanSplineInterpolation object.
+"""
+function HymanSpline(x::Vector{Float64}, y::Vector{Float64}; bc_type::String="not-a-knot", extrapolate::Bool=true)
+    spl = CubicSpline(x, y; bc_type=bc_type, extrapolate=extrapolate)
+    n = length(x)
+    h = diff(x)
+    delta = diff(y) ./ h
+
+    # Knot slopes of the cubic spline: b[i] at the left end of each interval,
+    # and the derivative of the last interval at x[n].
+    m = zeros(Float64, n)
+    m[1:n-1] .= spl.b
+    m[n] = spl.b[n-1] + 2 * spl.c[n-1] * h[n-1] + 3 * spl.d[n-1] * h[n-1]^2
+
+    _hyman_filter!(m, delta)
+
+    a = y
+    b, c, d = _hermite_coeffs(h, delta, m)
+    I = _cumulative_integral(x, a, b, c, d)
+    return HymanSplineInterpolation(x, y, m, a, b, c, d, I, spl.bc_type, extrapolate)
+end
+
+# Evaluation, derivative, and antiderivative are shared with CubicSpline via
+# AbstractCubicSplineInterpolation.
 
 
 
@@ -597,15 +715,7 @@ function PchipSpline(x::Vector{Float64}, y::Vector{Float64}; extrapolate::Bool=t
 
     # Calculate coefficients
     a = y
-    b = zeros(Float64, n - 1)
-    c = zeros(Float64, n - 1)
-    d = zeros(Float64, n - 1)
-
-    for i = 1:n-1
-        b[i] = m[i]
-        c[i] = (3 * delta[i] - 2 * m[i] - m[i+1]) / h[i]
-        d[i] = (m[i] + m[i+1] - 2 * delta[i]) / h[i]^2
-    end
+    b, c, d = _hermite_coeffs(h, delta, m)
 
     I = _cumulative_integral(x, a, b, c, d)
     return PchipSplineInterpolation(x, y, m, a, b, c, d, I, extrapolate)
@@ -775,14 +885,7 @@ function _pchip_coeffs(x, y)
         m[n] = delta[1]
     end
 
-    b = zeros(T, n - 1)
-    c = zeros(T, n - 1)
-    d = zeros(T, n - 1)
-    for i = 1:n-1
-        b[i] = m[i]
-        c[i] = (3 * delta[i] - 2 * m[i] - m[i+1]) / h[i]
-        d[i] = (m[i] + m[i+1] - 2 * delta[i]) / (h[i] * h[i])
-    end
+    b, c, d = _hermite_coeffs(h, delta, m)
     return m, b, c, d
 end
 
