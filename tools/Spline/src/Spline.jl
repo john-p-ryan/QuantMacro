@@ -9,6 +9,7 @@ export CubicSpline, CubicSplineInterpolation,
        PchipSpline, PchipSplineInterpolation,
        HymanSpline, HymanSplineInterpolation,
        BilinearSpline, BilinearSplineInterpolation,
+       MultilinearSpline, MultilinearSplineInterpolation,
        evaluate_spline, evaluate_spline_derivative, evaluate_spline_antiderivative,
        evaluate_spline!, evaluate_spline_derivative!, evaluate_spline_antiderivative!,
        safe_spline, safe_pchip,
@@ -21,6 +22,12 @@ export CubicSpline, CubicSplineInterpolation,
 @inline function _check_out(results, new_x)
     length(results) == length(new_x) ||
         throw(DimensionMismatch("output vector must have the same length as new_x"))
+end
+
+# Knots must be strictly increasing; `issorted` alone would admit duplicates.
+@inline function _check_increasing(v, name="x")
+    all(i -> v[i] < v[i+1], 1:length(v)-1) ||
+        throw(ArgumentError("$name must be strictly increasing"))
 end
 
 # Index of the cell containing `v`, clamped to a valid interval index.
@@ -184,9 +191,7 @@ function CubicSpline(x::Vector{Float64}, y::Vector{Float64}; bc_type::String="no
     if n <= 2
         throw(ArgumentError("At least 3 data points are required for cubic spline interpolation"))
     end
-    if !issorted(x)
-        throw(ArgumentError("x must be strictly increasing"))
-    end
+    _check_increasing(x)
     bc_type_lower = lowercase(bc_type)
     if bc_type_lower ∉ ["natural", "clamped", "not-a-knot"]
         @warn "Boundary condition type '$bc_type' not recognized, defaulting to 'not-a-knot'."
@@ -194,10 +199,6 @@ function CubicSpline(x::Vector{Float64}, y::Vector{Float64}; bc_type::String="no
     end
 
     h = diff(x)
-    if any(h .<= 0)
-        throw(ArgumentError("x must be strictly increasing"))
-    end
-
     a = y  # a[i] = y[i]
 
     # Right-hand side of the tridiagonal system for the second derivatives
@@ -521,9 +522,7 @@ function LinearSpline(x::Vector{Float64}, y::Vector{Float64}; extrapolate::Bool=
     if n < 2
         throw(ArgumentError("At least 2 data points are required for linear spline interpolation"))
     end
-    if !issorted(x)
-        throw(ArgumentError("x must be strictly increasing"))
-    end
+    _check_increasing(x)
 
     slopes = diff(y) ./ diff(x)
     zs = zero(slopes)
@@ -676,9 +675,7 @@ function PchipSpline(x::Vector{Float64}, y::Vector{Float64}; extrapolate::Bool=t
     if n < 2
         throw(ArgumentError("At least 2 data points are required for PCHIP interpolation"))
     end
-    if !issorted(x)
-        throw(ArgumentError("x must be strictly increasing"))
-    end
+    _check_increasing(x)
 
     h = diff(x)
     delta = diff(y) ./ h
@@ -698,20 +695,25 @@ function PchipSpline(x::Vector{Float64}, y::Vector{Float64}; extrapolate::Bool=t
     end
 
     # Endpoint slopes (special handling to ensure monotonicity and shape preservation)
-    m[1] = ((2 * h[1] + h[2]) * delta[1] - h[1] * delta[2]) / (h[1] + h[2])
-    if sign(m[1]) != sign(delta[1])
-      m[1] = 0.0
-    elseif sign(delta[1]) != sign(delta[2]) && abs(m[1]) > abs(3*delta[1])
-        m[1] = 3*delta[1]
-    end
-    
-    m[n] = ((2 * h[n-1] + h[n-2]) * delta[n-1] - h[n-1] * delta[n-2]) / (h[n-1] + h[n-2])
-    if sign(m[n]) != sign(delta[n-1])
-        m[n] = 0.0
-    elseif sign(delta[n-1]) != sign(delta[n-2]) && abs(m[n]) > abs(3 * delta[n-1])
-      m[n] = 3*delta[n-1]
-    end
+    if n > 2
+        m[1] = ((2 * h[1] + h[2]) * delta[1] - h[1] * delta[2]) / (h[1] + h[2])
+        if sign(m[1]) != sign(delta[1])
+            m[1] = 0.0
+        elseif sign(delta[1]) != sign(delta[2]) && abs(m[1]) > abs(3 * delta[1])
+            m[1] = 3 * delta[1]
+        end
 
+        m[n] = ((2 * h[n-1] + h[n-2]) * delta[n-1] - h[n-1] * delta[n-2]) / (h[n-1] + h[n-2])
+        if sign(m[n]) != sign(delta[n-1])
+            m[n] = 0.0
+        elseif sign(delta[n-1]) != sign(delta[n-2]) && abs(m[n]) > abs(3 * delta[n-1])
+            m[n] = 3 * delta[n-1]
+        end
+    else
+        # Two points: the interpolant is the secant line.
+        m[1] = delta[1]
+        m[n] = delta[1]
+    end
 
     # Calculate coefficients
     a = y
@@ -973,9 +975,8 @@ function BilinearSpline(x::Vector{Float64}, y::Vector{Float64}, z::Matrix{Float6
         throw(ArgumentError("At least 2 data points in each dimension are required for bilinear interpolation"))
     end
     
-    if !issorted(x) || !issorted(y)
-        throw(ArgumentError("x and y must be strictly increasing"))
-    end
+    _check_increasing(x, "x")
+    _check_increasing(y, "y")
     
     if !(bc_type in ["linear", "constant"])
         throw(ArgumentError("bc_type must be one of 'linear' or 'constant'"))
@@ -1135,9 +1136,194 @@ function _locate(knots::Vector{Float64}, q::Vector{Float64}, clamped::Bool)
 end
 
 
+# --- Multilinear Spline Implementation ---
 
+# Piecewise multilinear interpolation on an N-dimensional rectilinear grid: the
+# N-dimensional analogue of `BilinearSplineInterpolation`. Within each cell the
+# interpolant is the tensor-product linear polynomial through the 2^N corner
+# values. It is evaluated from those corners directly rather than from
+# precomputed coefficients, of which there would be 2^N per cell.
+struct MultilinearSplineInterpolation{N}
+    knots::NTuple{N,Vector{Float64}}  # grid points along each dimension, strictly increasing
+    values::Array{Float64,N}          # values[i1, ..., iN] = f(knots[1][i1], ..., knots[N][iN])
+    extrapolate::Bool                 # Whether to extrapolate for points outside the grid
+    bc_type::String                   # Boundary condition type: "linear" or "constant"
+end
 
+"""
+    MultilinearSpline(x1, x2, ..., xN, values; extrapolate=true, bc_type="linear")
+    MultilinearSpline((x1, x2, ..., xN), values; extrapolate=true, bc_type="linear")
 
+Constructs a MultilinearSplineInterpolation object from N grid vectors and the values on
+their tensor-product grid. This is the N-dimensional analogue of `BilinearSpline`: within
+each grid cell the interpolant is the multilinear polynomial through the 2^N corner
+values, and it reduces to linear interpolation along each grid line.
+
+# Arguments
+- `x1, ..., xN`: Arrays of grid coordinates, one per dimension. Each must be strictly
+                 increasing with at least 2 points. May also be passed as a single tuple.
+- `values`: N-dimensional array of values at the grid points, where values[i1, ..., iN]
+            corresponds to f(x1[i1], ..., xN[iN]).
+            Must have dimensions length(x1) × ... × length(xN).
+- `extrapolate`: Boolean indicating whether to extrapolate for points outside the
+                 range of the input grid. Defaults to true.
+- `bc_type`: String indicating the boundary condition type for extrapolation.
+             Options are:
+             - "linear": Linear extrapolation (continues the edge cell's multilinear polynomial)
+             - "constant": Constant extrapolation (uses the nearest point on the grid boundary)
+             Defaults to "linear".
+
+# Returns
+- A MultilinearSplineInterpolation object.
+"""
+function MultilinearSpline(knots::NTuple{N,Vector{Float64}}, values::Array{Float64,N};
+                           extrapolate::Bool=true, bc_type::String="linear") where {N}
+    if N < 1
+        throw(ArgumentError("At least one dimension is required for multilinear interpolation"))
+    end
+
+    dims = map(length, knots)
+    if size(values) != dims
+        throw(DimensionMismatch("values array dimensions must match the grid vector lengths: expected size $(dims), got $(size(values))"))
+    end
+
+    for (k, x) in enumerate(knots)
+        if length(x) < 2
+            throw(ArgumentError("At least 2 data points in each dimension are required for multilinear interpolation"))
+        end
+        _check_increasing(x, "x$k")
+    end
+
+    if !(bc_type in ["linear", "constant"])
+        throw(ArgumentError("bc_type must be one of 'linear' or 'constant'"))
+    end
+
+    return MultilinearSplineInterpolation{N}(knots, values, extrapolate, bc_type)
+end
+
+# `MultilinearSpline(x1, ..., xN, values)`: the argument order of `BilinearSpline(x, y, z)`.
+function MultilinearSpline(args::Vararg{Array{Float64}}; kwargs...)
+    knots, values = Base.front(args), last(args)
+    if length(knots) != ndims(values)
+        throw(DimensionMismatch("expected $(ndims(values)) grid vectors for a $(ndims(values))-dimensional values array, got $(length(knots))"))
+    end
+    return MultilinearSpline(knots, values; kwargs...)
+end
+
+"""
+    evaluate_spline(spline::MultilinearSplineInterpolation{N}, new_x1, ..., new_xN)
+
+Evaluates the multilinear spline interpolation at new N-dimensional points.
+
+# Arguments
+- `spline`: A MultilinearSplineInterpolation object.
+- `new_x1, ..., new_xN`: Arrays of query coordinates, one per dimension, all of the same
+                         length. The i-th point is (new_x1[i], ..., new_xN[i]).
+
+# Returns
+- Array of interpolated values at the new points.
+"""
+function evaluate_spline!(results::Vector{Float64}, spline::MultilinearSplineInterpolation{N},
+                          new_x::Vararg{Vector{Float64},N}) where {N}
+    n = length(new_x[1])
+    if !all(q -> length(q) == n, new_x)
+        throw(DimensionMismatch("query coordinate vectors must all have the same length"))
+    end
+    _check_out(results, new_x[1])
+
+    for i in 1:n
+        results[i] = _multilinear_value(spline, ntuple(k -> new_x[k][i], Val(N)))
+    end
+    return results
+end
+
+evaluate_spline(spline::MultilinearSplineInterpolation{N}, new_x::Vararg{Vector{Float64},N}) where {N} =
+    evaluate_spline!(zeros(Float64, length(new_x[1])), spline, new_x...)
+
+# Scalar evaluation honouring the extrapolation setting and boundary condition.
+@inline function _multilinear_value(spline::MultilinearSplineInterpolation{N}, point::NTuple{N,Float64}) where {N}
+    knots = spline.knots
+    outside = !all(ntuple(k -> knots[k][1] <= point[k] <= knots[k][end], Val(N)))
+    if outside
+        spline.extrapolate || return NaN
+        if spline.bc_type == "constant"
+            # Use closest point on the boundary for constant extrapolation
+            return evaluate_point(spline, ntuple(k -> clamp(point[k], knots[k][1], knots[k][end]), Val(N))...)
+        end
+    end
+    return evaluate_point(spline, point...)
+end
+
+"""
+    evaluate_point(spline::MultilinearSplineInterpolation{N}, x1, ..., xN)
+
+Helper function that evaluates the multilinear spline at a single point (x1, ..., xN).
+
+# Arguments
+- `spline`: A MultilinearSplineInterpolation object.
+- `x1, ..., xN`: Coordinates of the point at which to evaluate the spline.
+
+# Returns
+- Interpolated value at the given point.
+"""
+@inline function evaluate_point(spline::MultilinearSplineInterpolation{N}, point::Vararg{Float64,N}) where {N}
+    # Find the grid cell containing the point and the unit-cell offset from its lower corner
+    knots = spline.knots
+    idx = ntuple(k -> _cell_index(knots[k], point[k]), Val(N))
+    t = ntuple(k -> (point[k] - knots[k][idx[k]]) / (knots[k][idx[k]+1] - knots[k][idx[k]]), Val(N))
+    return _cell_value(spline, idx, t)
+end
+
+# Multilinear polynomial of the cell with lower corner `idx` at unit-cell offsets `t`,
+# t[k] = (x[k] - knots[k][idx[k]]) / cell width. Offsets outside [0, 1] continue the
+# polynomial beyond the cell, which is what linear extrapolation requires.
+@inline _cell_value(spline::MultilinearSplineInterpolation{N}, idx::NTuple{N,Int}, t::NTuple{N,Float64}) where {N} =
+    _lerp(spline.values, CartesianIndex(idx), t, Val(N))
+
+# Linear interpolation along dimension K between the two (K-1)-dimensional interpolants
+# on the faces of the cell at offsets 0 and 1 in that dimension. The recursion unrolls
+# at compile time into the sum over the 2^N cell corners weighted by products of the
+# one-dimensional hat functions.
+@inline _lerp(values::Array{Float64,N}, base::CartesianIndex{N}, t::NTuple{N,Float64}, ::Val{0}) where {N} = values[base]
+@inline function _lerp(values::Array{Float64,N}, base::CartesianIndex{N}, t::NTuple{N,Float64}, ::Val{K}) where {N,K}
+    step = CartesianIndex(ntuple(k -> k == K ? 1 : 0, Val(N)))
+    return (1.0 - t[K]) * _lerp(values, base, t, Val(K - 1)) + t[K] * _lerp(values, base + step, t, Val(K - 1))
+end
+
+"""
+    evaluate_spline_grid(spline::MultilinearSplineInterpolation{N}, grid_x1, ..., grid_xN)
+
+Evaluates the multilinear spline on the tensor-product grid of the given coordinate vectors.
+
+# Arguments
+- `spline`: A MultilinearSplineInterpolation object.
+- `grid_x1, ..., grid_xN`: Arrays of coordinates forming a grid, one per dimension.
+
+# Returns
+- An N-dimensional array of values with dimensions length(grid_x1) × ... × length(grid_xN),
+  where result[i1, ..., iN] is the interpolated value at (grid_x1[i1], ..., grid_xN[iN]).
+"""
+function evaluate_spline_grid(spline::MultilinearSplineInterpolation{N}, grids::Vararg{Vector{Float64},N}) where {N}
+    result = Array{Float64,N}(undef, map(length, grids))
+
+    # Locate every query coordinate once per dimension instead of per cell, and
+    # convert its offset to a unit-cell offset there too.
+    clamped = spline.extrapolate && spline.bc_type == "constant"
+    loc = map((knots, g) -> _locate(knots, g, clamped), spline.knots, grids)
+    idx = map(l -> l[1], loc)
+    t = map((knots, l) -> l[2] ./ diff(knots)[l[1]], spline.knots, loc)
+    inside = map(l -> l[3], loc)
+
+    # Column-major: the first array index runs innermost.
+    for I in CartesianIndices(result)
+        if spline.extrapolate || all(ntuple(k -> inside[k][I[k]], Val(N)))
+            result[I] = _cell_value(spline, ntuple(k -> idx[k][I[k]], Val(N)), ntuple(k -> t[k][I[k]], Val(N)))
+        else
+            result[I] = NaN
+        end
+    end
+    return result
+end
 
 
 # --- Grid Tools ---
