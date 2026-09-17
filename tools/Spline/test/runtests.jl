@@ -11,5 +11,6 @@ include("helpers.jl")
     include("test_ad.jl")
     include("test_bilinear.jl")
     include("test_multilinear.jl")
+    include("test_pchip2d.jl")
     include("test_grid.jl")
 end

@@ -10,6 +10,7 @@ export CubicSpline, CubicSplineInterpolation,
        HymanSpline, HymanSplineInterpolation,
        BilinearSpline, BilinearSplineInterpolation,
        MultilinearSpline, MultilinearSplineInterpolation,
+       Pchip2DSpline, Pchip2DSplineInterpolation,
        evaluate_spline, evaluate_spline_derivative, evaluate_spline_antiderivative,
        evaluate_spline!, evaluate_spline_derivative!, evaluate_spline_antiderivative!,
        safe_spline, safe_pchip,
@@ -73,6 +74,52 @@ function _hermite_coeffs(h, delta, m)
         d[i] = (m[i] + m[i+1] - 2 * delta[i]) / (h[i] * h[i])
     end
     return b, c, d
+end
+
+# Fritsch-Carlson (1980) knot slopes for PCHIP from the interval widths `h` and
+# secant slopes `delta`. Interior slopes are the weighted harmonic mean of the
+# two neighbouring secants, and zero where those differ in sign or vanish, so
+# local extrema and flat segments are preserved. Endpoint slopes come from the
+# non-centred three-point formula, set to zero if they disagree in sign with
+# the adjacent secant and capped at three times it when the first two secants
+# differ in sign. Generic in the element type so it also works for dual numbers.
+function _pchip_slopes(h, delta)
+    T = promote_type(eltype(h), eltype(delta))
+    n = length(h) + 1
+    m = zeros(T, n)
+
+    # Interior points
+    for i = 2:n-1
+        if delta[i-1] * delta[i] <= 0  # Different signs or one is zero
+            m[i] = zero(T)
+        else
+            w1 = 2 * h[i] + h[i-1]
+            w2 = h[i] + 2 * h[i-1]
+            m[i] = (w1 + w2) / (w1 / delta[i-1] + w2 / delta[i])
+        end
+    end
+
+    # Endpoint slopes with monotonicity preservation
+    if n > 2
+        m[1] = ((2 * h[1] + h[2]) * delta[1] - h[1] * delta[2]) / (h[1] + h[2])
+        if delta[1] * m[1] <= 0  # Different signs or slope is zero
+            m[1] = zero(T)
+        elseif (delta[1] * delta[2] <= 0) && (abs(m[1]) > abs(3 * delta[1]))
+            m[1] = 3 * delta[1]
+        end
+
+        m[n] = ((2 * h[n-1] + h[n-2]) * delta[n-1] - h[n-1] * delta[n-2]) / (h[n-1] + h[n-2])
+        if delta[n-1] * m[n] <= 0  # Different signs or slope is zero
+            m[n] = zero(T)
+        elseif (delta[n-1] * delta[n-2] <= 0) && (abs(m[n]) > abs(3 * delta[n-1]))
+            m[n] = 3 * delta[n-1]
+        end
+    else
+        # Two points: the interpolant is the secant line.
+        m[1] = delta[1]
+        m[n] = delta[1]
+    end
+    return m
 end
 
 # Hyman (1983) filter. Clamps the knot slopes `m` so that every interval
@@ -680,40 +727,8 @@ function PchipSpline(x::Vector{Float64}, y::Vector{Float64}; extrapolate::Bool=t
     h = diff(x)
     delta = diff(y) ./ h
 
-    # Compute slopes (m) using Fritsch-Carlson method
-    m = zeros(Float64, n)
-
-    # Interior points
-    for i = 2:n-1
-        if sign(delta[i-1]) != sign(delta[i])
-            m[i] = 0.0
-        else
-            w1 = 2 * h[i] + h[i-1]
-            w2 = h[i] + 2 * h[i-1]
-            m[i] = (w1 + w2) / (w1 / delta[i-1] + w2 / delta[i])
-        end
-    end
-
-    # Endpoint slopes (special handling to ensure monotonicity and shape preservation)
-    if n > 2
-        m[1] = ((2 * h[1] + h[2]) * delta[1] - h[1] * delta[2]) / (h[1] + h[2])
-        if sign(m[1]) != sign(delta[1])
-            m[1] = 0.0
-        elseif sign(delta[1]) != sign(delta[2]) && abs(m[1]) > abs(3 * delta[1])
-            m[1] = 3 * delta[1]
-        end
-
-        m[n] = ((2 * h[n-1] + h[n-2]) * delta[n-1] - h[n-1] * delta[n-2]) / (h[n-1] + h[n-2])
-        if sign(m[n]) != sign(delta[n-1])
-            m[n] = 0.0
-        elseif sign(delta[n-1]) != sign(delta[n-2]) && abs(m[n]) > abs(3 * delta[n-1])
-            m[n] = 3 * delta[n-1]
-        end
-    else
-        # Two points: the interpolant is the secant line.
-        m[1] = delta[1]
-        m[n] = delta[1]
-    end
+    # Knot slopes from the Fritsch-Carlson method
+    m = _pchip_slopes(h, delta)
 
     # Calculate coefficients
     a = y
@@ -850,43 +865,9 @@ function _pchip_coeffs(x, y)
     n == length(y) || throw(DimensionMismatch("x and y must have the same length"))
     n < 2 && throw(ArgumentError("At least 2 data points are required for PCHIP interpolation"))
 
-    T = promote_type(eltype(x), eltype(y))
     h = diff(x)
     delta = diff(y) ./ h
-    m = zeros(T, n)
-
-    # Interior points
-    for i = 2:n-1
-        if delta[i-1] * delta[i] <= 0  # Different signs or one is zero
-            m[i] = 0.0
-        else
-            w1 = 2 * h[i] + h[i-1]
-            w2 = h[i] + 2 * h[i-1]
-            m[i] = (w1 + w2) / (w1 / delta[i-1] + w2 / delta[i])
-        end
-    end
-
-    # Endpoint slopes with monotonicity preservation
-    if n > 2
-        m[1] = ((2 * h[1] + h[2]) * delta[1] - h[1] * delta[2]) / (h[1] + h[2])
-        if delta[1] * m[1] <= 0  # Different signs or slope is zero
-            m[1] = 0.0
-        elseif (delta[1] * delta[2] <= 0) && (abs(m[1]) > abs(3 * delta[1]))
-            m[1] = 3 * delta[1]
-        end
-
-        m[n] = ((2 * h[n-1] + h[n-2]) * delta[n-1] - h[n-1] * delta[n-2]) / (h[n-1] + h[n-2])
-        if delta[n-1] * m[n] <= 0  # Different signs or slope is zero
-            m[n] = 0.0
-        elseif (delta[n-1] * delta[n-2] <= 0) && (abs(m[n]) > abs(3 * delta[n-1]))
-            m[n] = 3 * delta[n-1]
-        end
-    else
-        # Special case for n=2: use simple secant slopes
-        m[1] = delta[1]
-        m[n] = delta[1]
-    end
-
+    m = _pchip_slopes(h, delta)
     b, c, d = _hermite_coeffs(h, delta, m)
     return m, b, c, d
 end
@@ -1323,6 +1304,259 @@ function evaluate_spline_grid(spline::MultilinearSplineInterpolation{N}, grids::
         end
     end
     return result
+end
+
+
+# --- 2-D PCHIP (Tensor-Product) Spline Implementation ---
+
+# Piecewise bicubic Hermite interpolation on a rectilinear grid with the node
+# derivatives supplied by PCHIP: the two-dimensional analogue of `PchipSpline`,
+# built like `BilinearSpline`. Along every grid line x = x[i] or y = y[j] the
+# interpolant is exactly the one-dimensional `PchipSpline` of that line, so it
+# inherits its shape preservation there. Within a cell it is the tensor-product
+# cubic Hermite polynomial determined by the values, x- and y-slopes, and cross
+# derivatives at the four corners. It is evaluated from that node data with the
+# Hermite basis rather than from precomputed cell polynomials, so that the
+# linear extrapolation outside the grid falls out of the same formula.
+struct Pchip2DSplineInterpolation
+    x::Vector{Float64}    # x grid points
+    y::Vector{Float64}    # y grid points
+    z::Matrix{Float64}    # z values at grid points z[i,j] = f(x[i], y[j])
+    zx::Matrix{Float64}   # PCHIP slopes along x at the nodes (df/dx)
+    zy::Matrix{Float64}   # PCHIP slopes along y at the nodes (df/dy)
+    zxy::Matrix{Float64}  # Cross derivatives at the nodes (d2f/dxdy)
+    extrapolate::Bool     # Whether to extrapolate for points outside the grid
+    bc_type::String       # Boundary condition type: "linear" or "constant"
+end
+
+"""
+    Pchip2DSpline(x, y, z; extrapolate=true, bc_type="linear")
+
+Constructs a Pchip2DSplineInterpolation object from given x, y grid and z values: a
+tensor-product PCHIP, the shape-preserving cubic counterpart of `BilinearSpline`.
+
+Along every grid line `x = x[i]` or `y = y[j]` the interpolant coincides with the
+one-dimensional `PchipSpline` of the data on that line, including its linear
+extrapolation, so it interpolates the nodes and is monotone along grid lines wherever
+the data is. Between grid lines it is the bicubic Hermite polynomial of the cell,
+whose corner data are the values, the PCHIP slopes along x and along y, and cross
+derivatives estimated by applying the PCHIP slope formula to the x-slopes along y and
+to the y-slopes along x and averaging the two (the slope formula is nonlinear, so the
+two orders differ; the average is symmetric in x and y). The result is C¹, reproduces
+bilinear functions exactly, and for separable data `z[i,j] = g(x[i]) * h(y[j])` (or
+`g + h`) equals the product (sum) of the one-dimensional PCHIPs of `g` and `h`.
+Monotonicity is guaranteed along grid lines only, not in the interior of the cells.
+
+# Arguments
+- `x`: Array of x-coordinates forming a grid. Must be strictly increasing, with at least 2 points.
+- `y`: Array of y-coordinates forming a grid. Must be strictly increasing, with at least 2 points.
+- `z`: Matrix of z-values at the grid points, where z[i,j] corresponds to f(x[i], y[j]).
+       Must have dimensions length(x) × length(y).
+- `extrapolate`: Boolean indicating whether to extrapolate for points outside the
+                 range of the input grid. Defaults to true.
+- `bc_type`: String indicating the boundary condition type for extrapolation.
+             Options are:
+             - "linear": Linear extrapolation in the outside coordinate from the value and
+                         slope on the grid boundary, as `PchipSpline` does in one dimension.
+                         Past a corner the extension is bilinear in the two offsets.
+             - "constant": Constant extrapolation (uses the nearest edge value)
+             Defaults to "linear".
+
+# Returns
+- A Pchip2DSplineInterpolation object.
+"""
+function Pchip2DSpline(x::Vector{Float64}, y::Vector{Float64}, z::Matrix{Float64};
+                       extrapolate::Bool=true, bc_type::String="linear")
+    nx = length(x)
+    ny = length(y)
+
+    if size(z) != (nx, ny)
+        throw(DimensionMismatch("z matrix dimensions must match the length of x and y: expected size $(nx) × $(ny), got $(size(z))"))
+    end
+
+    if nx < 2 || ny < 2
+        throw(ArgumentError("At least 2 data points in each dimension are required for 2-D PCHIP interpolation"))
+    end
+
+    _check_increasing(x, "x")
+    _check_increasing(y, "y")
+
+    if !(bc_type in ["linear", "constant"])
+        throw(ArgumentError("bc_type must be one of 'linear' or 'constant'"))
+    end
+
+    hx = diff(x)
+    hy = diff(y)
+
+    # PCHIP slopes along every grid line
+    zx = similar(z)
+    zy = similar(z)
+    for j in 1:ny
+        @views zx[:, j] .= _pchip_slopes(hx, diff(z[:, j]) ./ hx)
+    end
+    for i in 1:nx
+        @views zy[i, :] .= _pchip_slopes(hy, diff(z[i, :]) ./ hy)
+    end
+
+    # Cross derivatives: the PCHIP slopes of zx along y, averaged with those of
+    # zy along x.
+    zxy = similar(z)
+    for i in 1:nx
+        @views zxy[i, :] .= _pchip_slopes(hy, diff(zx[i, :]) ./ hy)
+    end
+    for j in 1:ny
+        @views zxy[:, j] .= (zxy[:, j] .+ _pchip_slopes(hx, diff(zy[:, j]) ./ hx)) ./ 2
+    end
+
+    return Pchip2DSplineInterpolation(x, y, z, zx, zy, zxy, extrapolate, bc_type)
+end
+
+"""
+    evaluate_spline(spline::Pchip2DSplineInterpolation, new_x::Vector{Float64}, new_y::Vector{Float64})
+
+Evaluates the 2-D PCHIP spline interpolation at new (x,y) coordinates.
+
+# Arguments
+- `spline`: A Pchip2DSplineInterpolation object.
+- `new_x`: Array of new x-coordinates at which to evaluate the spline.
+- `new_y`: Array of new y-coordinates at which to evaluate the spline.
+               Must have the same length as new_x.
+
+# Returns
+- Array of interpolated z-values at the new coordinates.
+"""
+function evaluate_spline!(results::Vector{Float64}, spline::Pchip2DSplineInterpolation,
+                          new_x::Vector{Float64}, new_y::Vector{Float64})
+    if length(new_x) != length(new_y)
+        throw(DimensionMismatch("new_x and new_y must have the same length"))
+    end
+    _check_out(results, new_x)
+
+    for i in eachindex(new_x)
+        results[i] = _pchip2d_value(spline, new_x[i], new_y[i])
+    end
+    return results
+end
+
+evaluate_spline(spline::Pchip2DSplineInterpolation, new_x::Vector{Float64}, new_y::Vector{Float64}) =
+    evaluate_spline!(zeros(Float64, length(new_x)), spline, new_x, new_y)
+
+# Scalar evaluation honouring the extrapolation setting and boundary condition.
+@inline function _pchip2d_value(spline::Pchip2DSplineInterpolation, x_val::Float64, y_val::Float64)
+    outside = x_val < spline.x[1] || x_val > spline.x[end] ||
+              y_val < spline.y[1] || y_val > spline.y[end]
+    if outside
+        spline.extrapolate || return NaN
+        if spline.bc_type == "constant"
+            # Use closest point on the boundary for constant extrapolation
+            x_val = clamp(x_val, spline.x[1], spline.x[end])
+            y_val = clamp(y_val, spline.y[1], spline.y[end])
+        end
+    end
+    return evaluate_point(spline, x_val, y_val)
+end
+
+"""
+    evaluate_point(spline::Pchip2DSplineInterpolation, x_val::Float64, y_val::Float64)
+
+Helper function that evaluates the 2-D PCHIP spline at a single point (x_val, y_val),
+extrapolating linearly outside the grid.
+
+# Arguments
+- `spline`: A Pchip2DSplineInterpolation object.
+- `x_val`: x-coordinate at which to evaluate the spline.
+- `y_val`: y-coordinate at which to evaluate the spline.
+
+# Returns
+- Interpolated z-value at the given coordinates.
+"""
+@inline function evaluate_point(spline::Pchip2DSplineInterpolation, x_val::Float64, y_val::Float64)
+    i, wx = _hermite_weights(spline.x, x_val)
+    j, wy = _hermite_weights(spline.y, y_val)
+    return _cell_value(spline, i, j, wx, wy)
+end
+
+# Cubic Hermite basis at `v` on the knot interval containing it: the interval
+# index and the weights (phi_i, phi_{i+1}, psi_i, psi_{i+1}) of the values and
+# slopes at its two knots. Outside the knot range the weights are those of
+# linear extrapolation from the nearest end knot, which is how `PchipSpline`
+# extrapolates in one dimension.
+@inline function _hermite_weights(knots::Vector{Float64}, v::Float64)
+    n = length(knots)
+    if v < knots[1]
+        return 1, (1.0, 0.0, v - knots[1], 0.0)
+    elseif v > knots[end]
+        return n - 1, (0.0, 1.0, 0.0, v - knots[end])
+    end
+    i = _cell_index(knots, v)
+    h = knots[i+1] - knots[i]
+    t = (v - knots[i]) / h
+    u = 1.0 - t
+    return i, (u * u * (1.0 + 2.0 * t), t * t * (3.0 - 2.0 * t), h * t * u * u, -h * t * t * u)
+end
+
+# Tensor-product Hermite polynomial of the cell with lower corner (i, j) at the
+# basis weights `wx`, `wy` from `_hermite_weights`: the sum over the four corner
+# nodes of their value, x-slope, y-slope, and cross-derivative terms.
+@inline function _cell_value(spline::Pchip2DSplineInterpolation, i::Int, j::Int,
+                             wx::NTuple{4,Float64}, wy::NTuple{4,Float64})
+    return _node_value(spline, i,     j,     wx[1], wx[3], wy[1], wy[3]) +
+           _node_value(spline, i + 1, j,     wx[2], wx[4], wy[1], wy[3]) +
+           _node_value(spline, i,     j + 1, wx[1], wx[3], wy[2], wy[4]) +
+           _node_value(spline, i + 1, j + 1, wx[2], wx[4], wy[2], wy[4])
+end
+
+# Contribution of node (i, j) given its value weights `px`, `py` and slope weights `qx`, `qy`.
+@inline _node_value(spline::Pchip2DSplineInterpolation, i::Int, j::Int,
+                    px::Float64, qx::Float64, py::Float64, qy::Float64) =
+    (spline.z[i, j] * px + spline.zx[i, j] * qx) * py + (spline.zy[i, j] * px + spline.zxy[i, j] * qx) * qy
+
+"""
+    evaluate_spline_grid(spline::Pchip2DSplineInterpolation, grid_x::Vector{Float64}, grid_y::Vector{Float64})
+
+Evaluates the 2-D PCHIP spline on a 2D grid of points. Useful for visualization.
+
+# Arguments
+- `spline`: A Pchip2DSplineInterpolation object.
+- `grid_x`: Array of x-coordinates forming a grid.
+- `grid_y`: Array of y-coordinates forming a grid.
+
+# Returns
+- A matrix of z-values with dimensions length(grid_x) × length(grid_y),
+  where result[i,j] is the interpolated value at (grid_x[i], grid_y[j]).
+"""
+function evaluate_spline_grid(spline::Pchip2DSplineInterpolation, grid_x::Vector{Float64}, grid_y::Vector{Float64})
+    nx = length(grid_x)
+    ny = length(grid_y)
+    result = zeros(Float64, nx, ny)
+
+    # Locate every query coordinate and form its basis weights once instead of per cell.
+    clamped = spline.extrapolate && spline.bc_type == "constant"
+    ix, wx, inx = _locate_hermite(spline.x, grid_x, clamped)
+    iy, wy, iny = _locate_hermite(spline.y, grid_y, clamped)
+
+    # Column-major: the first matrix index runs innermost.
+    for j in 1:ny
+        for i in 1:nx
+            result[i, j] = (spline.extrapolate || (inx[i] && iny[j])) ?
+                _cell_value(spline, ix[i], iy[j], wx[i], wy[j]) : NaN
+        end
+    end
+
+    return result
+end
+
+# Interval index, Hermite basis weights, and an inside-the-range flag for each query.
+function _locate_hermite(knots::Vector{Float64}, q::Vector{Float64}, clamped::Bool)
+    idx = Vector{Int}(undef, length(q))
+    w = Vector{NTuple{4,Float64}}(undef, length(q))
+    inside = Vector{Bool}(undef, length(q))
+    for (k, v) in enumerate(q)
+        inside[k] = knots[1] <= v <= knots[end]
+        clamped && (v = clamp(v, knots[1], knots[end]))
+        idx[k], w[k] = _hermite_weights(knots, v)
+    end
+    return idx, w, inside
 end
 
 
