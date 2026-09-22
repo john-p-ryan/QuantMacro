@@ -36,6 +36,8 @@ QuantMacro/
 │       └── sequence_space_jacobians
 │
 ├── metrics/
+|   ├── TikTak.jl          (Julia package)
+|   ├── TikTak             (Python package)
 |   ├── sim_method_moments
 |   ├── indirect_inference
 |   └── sim_max_likelihood
@@ -128,6 +130,16 @@ The sequence space Jacobian (SSJ) method works directly with the model's equilib
 
 ---
 
+## Estimation
+
+### TikTak global optimizer — `metrics/TikTak.jl/` (Julia) and `metrics/TikTak/` (Python)
+
+Restartable, parallel implementations of the TikTak multistart algorithm of Arnoud, Guvenen & Kleineberg (2022) for structural estimation: scrambled Sobol screening followed by derivative-free local searches that start from a mix of each retained seed and the best local optimum found so far. Both packages are self-contained and model agnostic. They accept a scalar loss or a `MomentObjective` built from a function that returns model moments, handle infinite bounds through a box transformation, treat expected model failures (no equilibrium, nonconvergence) as infinite barriers, enforce a hard cumulative evaluation budget, journal every evaluation so runs can be resumed, and support warm starts from earlier runs.
+
+The Julia package runs its local searches on `Distributed` worker processes (or threads, or inline). The coordinator owns the run state, so workers need no shared filesystem and can live on other nodes. Local solvers are pluggable: a bounded Nelder–Mead (default), pattern search, NLopt's BOBYQA and relatives through a package extension, or a user-supplied solver. See `metrics/TikTak.jl/README.md`.
+
+---
+
 ## Tools
 
 
@@ -155,6 +167,7 @@ Custom spline interpolation routines in a unified interface (`evaluate_spline`, 
 
 ## References
 
+- Arnoud, A., Guvenen, F., & Kleineberg, T. (2022). Benchmarking global optimizers. *NBER Working Paper* 26340.
 - Aiyagari, S. R. (1994). Uninsured idiosyncratic risk and aggregate saving. *Quarterly Journal of Economics*, 109(3), 659–684.
 - Auclert, A., Bardóczy, B., Rognlie, M., & Straub, L. (2021). Using the sequence‐space Jacobian to solve and estimate heterogeneous‐agent models. *Econometrica*, 89(5), 2375–2408.
 - Boppart, T., Krusell, P., & Mitman, K. (2018). Exploiting MIT shocks in heterogeneous-agent economies. *Journal of Economic Dynamics and Control*, 89, 68–92.

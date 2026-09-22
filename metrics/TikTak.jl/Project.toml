@@ -1,0 +1,32 @@
+name = "TikTak"
+uuid = "9de7ae41-a632-4d0d-b094-c905780100f8"
+authors = ["John Ryan <johnryan6465@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+FileWatching = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+Sobol = "ed01d8cd-4d21-5b2a-85b4-cc3bdc58bad4"
+
+[weakdeps]
+NLopt = "76087f3c-5699-56af-9a33-bf431cd00edd"
+
+[extensions]
+TikTakNLoptExt = "NLopt"
+
+[compat]
+JSON = "1"
+NLopt = "1"
+Sobol = "1"
+julia = "1.10"
+
+[extras]
+NLopt = "76087f3c-5699-56af-9a33-bf431cd00edd"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "NLopt"]

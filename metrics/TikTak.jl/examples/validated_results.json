@@ -1,0 +1,53 @@
+{
+  "environment": {
+    "julia": "1.13.0",
+    "JSON": "1.9.0",
+    "Sobol": "1.5.0",
+    "NLopt": "1.2.1",
+    "platform": "Darwin",
+    "workers": 2
+  },
+  "tests_passed": 251,
+  "examples": {
+    "quadratic": {
+      "x": [
+        0.20000309069228006,
+        -0.4000072502815293
+      ],
+      "fun": 6.211896102346832e-11,
+      "n_evals": 265,
+      "n_failed": 0,
+      "status": "completed"
+    },
+    "rastrigin": {
+      "x": [
+        -9.355267915900356e-07,
+        3.296710636035982e-06
+      ],
+      "fun": 2.3298198925658653e-09,
+      "n_evals": 2826,
+      "n_failed": 0,
+      "status": "completed"
+    },
+    "ar1_moments": {
+      "x": [
+        0.6500000097853073,
+        0.19999999527024587
+      ],
+      "fun": 7.663460695356909e-16,
+      "n_evals": 843,
+      "n_failed": 0,
+      "status": "completed"
+    },
+    "rough_holes": {
+      "x": [
+        0.5934136102907359,
+        0.3020239415578545
+      ],
+      "fun": 0.0,
+      "n_evals": 829,
+      "n_failed": 77,
+      "status": "completed"
+    }
+  }
+}
