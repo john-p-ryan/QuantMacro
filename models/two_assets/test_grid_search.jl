@@ -1,16 +1,12 @@
 using Test
 using Statistics: mean
 
-# ── Load the module code (everything except the "Run" block) ──────
-# We include only the function/struct definitions by evaluating them
-# in a dedicated module so the top-level script lines don't execute.
+# ── Load the model definitions into a dedicated module ─────────────
+# grid_search_model.jl holds only definitions; the driver script
+# (grid_search.jl) is not loaded, so no solve/plotting runs here.
 
 module TwoAssetModel
-
-using LinearAlgebra
-
-include_string(@__MODULE__, join(readlines(joinpath(@__DIR__, "grid_search.jl"))[1:176], "\n"))
-
+include(joinpath(@__DIR__, "grid_search_model.jl"))
 end
 
 using .TwoAssetModel: Params, Grids, make_grids, u, adj_cost, bellman_update!, solve_vfi

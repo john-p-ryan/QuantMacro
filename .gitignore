@@ -6,3 +6,14 @@ build/
 dist/
 tiktak-runs/
 old/
+
+# Local tooling / agent config
+.vscode/
+AGENTS.md
+
+# Generated plots
+*.png
+
+# Julia package manifests (packages ship Project.toml only; root Manifest stays tracked)
+metrics/TikTak.jl/Manifest.toml
+tools/Spline/Manifest.toml
