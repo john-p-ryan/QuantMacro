@@ -402,15 +402,29 @@ end
 """
     solve_eig(A::Array{T,2}, B::Array{T,2}, n_x::Int) where T<: AbstractFloat
 
-Returns the transition and policy functions following the method SGU (2004) delineates. `A` and `B` are defined as in SGU. `n_x` is the number of states.
+Returns the policy and transition functions `(g_x, h_x, eu)` of `A * [x′; y′] = B * [x; y]`
+following SGU (2004), or `nothing` if the Blanchard-Kahn conditions fail. `A` and `B` are
+defined as in SGU. `n_x` is the number of states.
+
+Like SGU's `gx_hx`, this uses the ordered real generalized Schur (QZ) decomposition
+`A = Q*S*Z'`, `B = Q*T*Z'` rather than an eigendecomposition, so the stable subspace is
+spanned by orthonormal Schur vectors. The linearized histogram law of motion is highly
+non-normal, so its eigenvectors are nearly parallel and the eigenvector block that an
+eigendecomposition-based solution inverts is numerically singular.
 """
 function solve_eig(A::Array{T,2}, B::Array{T,2}, n_x::Int) where T<: AbstractFloat
 
-    F = eigen(B,A)
-    perm = sortperm(abs.(F.values))
-    V = F.vectors[:,perm]
-    D = F.values[perm]
-    m = findlast(abs.(D) .< 1)
+    F = schur(A, B)
+    # eigenvalues of the transition are β./α (singular A gives α = 0, an infinite eigenvalue)
+    stable = abs.(F.β) .< abs.(F.α)
+    # a complex pair (2×2 block of S) must be selected as a unit, or m miscounts it
+    for k in 1:size(F.S, 1)-1
+        if F.S[k+1, k] != 0
+            stable[k+1] = stable[k]
+        end
+    end
+    ordschur!(F, stable)
+    m = count(stable)
     eu = [true,true]
 
     if m > n_x
@@ -422,9 +436,15 @@ function solve_eig(A::Array{T,2}, B::Array{T,2}, n_x::Int) where T<: AbstractFlo
     end
 
     if all(eu)
-        h_x = V[1:m,1:m]*Diagonal(D)[1:m,1:m]*inv(V[1:m,1:m])
-        g_x = V[m+1:end,1:m]*inv(V[1:m,1:m])
-        return (real.(g_x), real.(h_x), eu)
+        Z11 = F.Z[1:m,1:m]
+        Z21 = F.Z[m+1:end,1:m]
+        if rank(Z11) < m
+            println("WARNING: the invertibility condition is violated !")
+        end
+        Z11_lu = lu(Z11)
+        h_x = Z11*(F.S[1:m,1:m] \ F.T[1:m,1:m]) / Z11_lu
+        g_x = Z21 / Z11_lu
+        return (g_x, h_x, eu)
     end
 
 end
