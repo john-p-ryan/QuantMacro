@@ -26,12 +26,13 @@
 
 
 using Plots, Parameters, Statistics, BenchmarkTools, Printf, Random, ForwardDiff
-include("spline.jl")
-include("Aiyagari_EGM.jl")
+using LinearAlgebra, Optim, SparseArrays
+using Spline # custom spline package
+include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
 
 # Load modules for each method
 module KS
-    # Note: KS_EGM_hist.jl internally includes spline.jl and Aiyagari_EGM.jl
+    # Note: KS_EGM_hist.jl loads Spline and wraps Aiyagari_EGM.jl in its own submodule
     include("KS_EGM_hist.jl")
 end
 include("BKM_transition.jl")
@@ -107,7 +108,7 @@ function main()
     # --- 1a. Solve Steady State (common for all methods) ---
     println("\nSolving for the steady state...")
     # Use Aiyagari module from BKM as it's at the top level
-    prim_ss, res_ss = SolveModel(; k_min=1e-6, k_max=60.0, nk=60, n_hist=125)
+    prim_ss, res_ss = solve_model(; k_min=1e-6, k_max=60.0, nk=60, n_hist=125)
     println("Steady state solved. K_ss = $(res_ss.K)")
 
     # --- 1b. Solve and Time Each Method ---

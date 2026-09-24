@@ -1,20 +1,20 @@
 # This file contains an algorithm for computing Sequence Space Jacobians
 # for the Krusell-Smith model, based on Auclert, Bardóczy, Rognlie, & Straub (2021).
 
-using Parameters, LinearAlgebra, SparseArrays
+using Parameters, LinearAlgebra, SparseArrays, Optim
+using Spline # custom spline package
 
-# Ensure the necessary functions and types from your original files are available
-include("spline.jl")
-include("Aiyagari_EGM.jl")
+# Steady state household block. Its idiosyncratic employment state ϵ is stored as z_grid / nz.
+include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
 
 # We need the backward_iterate function from your original implementation.
 function backward_iterate(prim_ss::Primitives, ∂V_next, r, w)
     @unpack_Primitives prim_ss 
 
-    k_pol = zeros(nk, nϵ)
-    c_pol = zeros(nk, nϵ)
+    k_pol = zeros(nk, nz)
+    c_pol = zeros(nk, nz)
 
-    for (ϵ_index, ϵ) in enumerate(ϵ_grid)
+    for (ϵ_index, ϵ) in enumerate(z_grid)
         p = M[ϵ_index,:]
         EMU_prime = ∂V_next * p
 
@@ -59,11 +59,11 @@ function compute_policy_sequences(prim_ss::Primitives, res_ss::Results, T::Int; 
     k_pol_shock, _, ∂V_at_shock = backward_iterate(prim_ss, ∂V_ss, r_shock, w_shock)
 
     # Build the transition matrix for the policy AT the shock
-    for ϵ_index in 1:nϵ
+    for ϵ_index in 1:nz
         k_spline = PchipSpline(prim_ss.k_grid, k_pol_shock[:, ϵ_index])
         res_temp.k_pol_hist[:, ϵ_index] = evaluate_spline(k_spline, prim_ss.k_hist)
     end
-    T_shock = BuildTransitionMatrix(prim_ss, res_temp)
+    T_shock = build_T_star(prim_ss, res_temp)
     
     # --- Step 2: Perform backward recursion for policies BEFORE the shock ---
     T_seq = Vector{SparseMatrixCSC{Float64, Int}}(undef, T)
@@ -72,11 +72,11 @@ function compute_policy_sequences(prim_ss::Primitives, res_ss::Results, T::Int; 
     for j in 1:T # j = periods before shock
         k_pol_j, _, ∂V_curr = backward_iterate(prim_ss, ∂V_prev, res_ss.r, res_ss.w)
 
-        for ϵ_index in 1:nϵ
+        for ϵ_index in 1:nz
             k_spline = PchipSpline(prim_ss.k_grid, k_pol_j[:, ϵ_index])
             res_temp.k_pol_hist[:, ϵ_index] = evaluate_spline(k_spline, prim_ss.k_hist)
         end
-        T_seq[j] = BuildTransitionMatrix(prim_ss, res_temp)
+        T_seq[j] = build_T_star(prim_ss, res_temp)
         ∂V_prev = ∂V_curr
     end
 
@@ -101,7 +101,7 @@ function fast_jacobian(prim_ss::Primitives, res_ss::Results, dr::Float64, dw::Fl
     J_K_r, J_K_w = zeros(T, T), zeros(T, T)
     T_ss = res_ss.T_star
     μ_ss_vec = vec(res_ss.μ)
-    k_hist_rep_vec = vec(repeat(prim_ss.k_hist, 1, prim_ss.nϵ))
+    k_hist_rep_vec = vec(repeat(prim_ss.k_hist, 1, prim_ss.nz))
 
     println("Constructing Jacobians...")
     # Loop over shock time `s` (columns of Jacobians)
@@ -208,7 +208,7 @@ end
 # Main workflow
 #=
 println("Solving for the model's steady state...")
-@time prim_ss, res_ss = SolveModel();
+@time prim_ss, res_ss = solve_model();
 println("Steady state found. K_ss = $(res_ss.K), r_ss = $(res_ss.r)")
 
 T = 300

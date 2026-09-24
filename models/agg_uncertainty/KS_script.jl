@@ -1,5 +1,6 @@
 module AiyagariModule
-    include("Aiyagari.jl")
+    using Parameters, LinearAlgebra, Optim, SparseArrays
+    include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_gridsearch.jl"))
 end
 
 module KSModule
@@ -10,7 +11,7 @@ using Plots, LinearAlgebra,  Parameters, Statistics
 
 
 # Solve the Aiyagari model
-@time prim_Aiyagari, res_Aiyagari = AiyagariModule.SolveModel()
+@time prim_Aiyagari, res_Aiyagari = AiyagariModule.solve_model(k_max=30.0) # match the k grid bound in KS.jl
 
 # plot the capital policy function
 plot(prim_Aiyagari.k_grid, res_Aiyagari.k_policy, label=["Employed" "Unemployed"], xlabel="k", ylabel="k'", title="Capital Policy Function")
@@ -23,18 +24,18 @@ plot(prim_Aiyagari.k_grid, sum(res_Aiyagari.μ, dims=2), xlabel="k", ylabel="Den
 res_Aiyagari.K
 
 function compute_moments_aiyagari(prim, res)
-    @unpack k_grid, ϵ_grid, ē, nϵ, nk, α, δ, L = prim
+    @unpack k_grid, z_grid, ē, nz, nk, α, δ, L = prim
     @unpack w, μ, K, r = res
-    
-    
-    # Create vectors for all (k, ϵ) combinations
-    k_vec = repeat(k_grid, nϵ)
-    ϵ_vec = vcat([fill(ϵ_grid[i], nk) for i in 1:nϵ]...)
+
+
+    # Create vectors for all (k, z) combinations
+    k_vec = repeat(k_grid, nz)
+    z_vec = vcat([fill(z_grid[i], nk) for i in 1:nz]...)
     μ_vec = vec(μ)
-    
-    # Compute income for each (k, ϵ) combination
+
+    # Compute income for each (k, z) combination
     # income = labor income + capital income
-    income_vec = w * ē * ϵ_vec .+ (r - δ) * k_vec
+    income_vec = w * ē * z_vec .+ (r - δ) * k_vec
     
     # Compute wealth (capital holdings)
     wealth_vec = k_vec

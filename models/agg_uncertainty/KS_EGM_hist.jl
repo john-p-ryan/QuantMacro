@@ -9,9 +9,11 @@ Young's histogram method for distributional estimates.
 using Parameters, LinearAlgebra, Random, Statistics, StatsBase, Interpolations
 using Base.Threads # for parallelization via multi-threading
 
-include("spline.jl")
+using Spline # custom spline package
+
 module Aiyagari
-include("Aiyagari_EGM.jl") 
+    using Parameters, LinearAlgebra, Optim, SparseArrays, Spline
+    include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
 end
 
 
@@ -114,7 +116,7 @@ function Initialize(;z_grid=[1.01, 0.99], K_min=10.8, K_max=12.4, nK=30, seed=12
 
     println("Solving Aiyagari model for initial KS distribution...")
     # By default, Primitives for Aiyagari and KS now use the same histogram grid
-    prim_ss, res_ss = Aiyagari.SolveModel(; 
+    prim_ss, res_ss = Aiyagari.solve_model(; 
         k_min=prim.k_hist_min, 
         k_max=prim.k_hist_max, 
         nk=prim.n_hist, 

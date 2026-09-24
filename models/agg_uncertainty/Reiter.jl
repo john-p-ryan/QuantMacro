@@ -34,11 +34,11 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
     # Define dimensions for our state and control vectors
     # States: x = [Z, μ (flattened, excluding the last element for each employment state)]
     # We exclude n_ϵ elements from μ (one for each employment state)
-    n_μ = n_hist * nϵ - nϵ  # Reduced by nϵ elements
+    n_μ = n_hist * nz - nz  # Reduced by nz elements
     n_x = 1 + n_μ
     
     # Controls: y = [k_policy (flattened)]
-    n_policy = nk * nϵ
+    n_policy = nk * nz
     n_y = n_policy
     
     # Define the steady state vectors, excluding redundant distribution elements
@@ -47,7 +47,7 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
     # Create a reduced μ vector (excluding last element for each employment state)
     μ_reduced = zeros(n_μ)
     idx = 1
-    for ϵ_idx in 1:nϵ
+    for ϵ_idx in 1:nz
         for k_idx in 1:(n_hist-1)  # Skip the last element for each ϵ
             μ_reduced[idx] = μ[k_idx, ϵ_idx]
             idx += 1
@@ -85,9 +85,9 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         μ_flat_reduced = v[x_indices[2:end]]
         
         # Reshape μ back into a full matrix with the constraint that distributions sum to fixed values
-        μ_t = create_dual_compatible_array(T, n_hist, nϵ)
+        μ_t = create_dual_compatible_array(T, n_hist, nz)
         idx = 1
-        for ϵ_idx in 1:nϵ
+        for ϵ_idx in 1:nz
             # Set the first n_hist-1 elements for each ϵ
             for k_idx in 1:(n_hist-1)
                 μ_t[k_idx, ϵ_idx] = μ_flat_reduced[idx]
@@ -107,8 +107,8 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         k_policy_flat = v[y_indices]
         
         # Reshape k_policy into a matrix safely
-        k_policy_t = create_dual_compatible_array(T, nk, nϵ)
-        for j in 1:nϵ
+        k_policy_t = create_dual_compatible_array(T, nk, nz)
+        for j in 1:nz
             for i in 1:nk
                 idx = (j-1)*nk + i
                 if idx <= length(k_policy_flat)
@@ -122,9 +122,9 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         μ′_flat_reduced = v[x′_indices[2:end]]
         
         # Reshape μ′ back into a full matrix with constraints
-        μ_t′ = create_dual_compatible_array(T, n_hist, nϵ)
+        μ_t′ = create_dual_compatible_array(T, n_hist, nz)
         idx = 1
-        for ϵ_idx in 1:nϵ
+        for ϵ_idx in 1:nz
             # Set the first n_hist-1 elements for each ϵ
             for k_idx in 1:(n_hist-1)
                 μ_t′[k_idx, ϵ_idx] = μ′_flat_reduced[idx]
@@ -141,8 +141,8 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         k_policy′_flat = v[y′_indices]
         
         # Reshape k_policy′ into a matrix safely
-        k_policy_t′ = create_dual_compatible_array(T, nk, nϵ)
-        for j in 1:nϵ
+        k_policy_t′ = create_dual_compatible_array(T, nk, nz)
+        for j in 1:nz
             for i in 1:nk
                 idx = (j-1)*nk + i
                 if idx <= length(k_policy′_flat)
@@ -158,7 +158,7 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         
         # Compute aggregate capital from distribution
         K_t = zero(T)
-        for ϵ_index in 1:nϵ
+        for ϵ_index in 1:nz
             for k_index in 1:n_hist
                 K_t += k_hist[k_index] * μ_t[k_index, ϵ_index]
             end
@@ -166,7 +166,7 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         
         # Compute future aggregate capital
         K_t′ = zero(T)
-        for ϵ_index in 1:nϵ
+        for ϵ_index in 1:nz
             for k_index in 1:n_hist
                 K_t′ += k_hist[k_index] * μ_t′[k_index, ϵ_index]
             end
@@ -181,9 +181,9 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         # ---------- Compute equilibrium conditions ----------
         
         # Derive consumption policy from budget constraint
-        c_policy_t = create_dual_compatible_array(T, nk, nϵ)
-        for ϵ_index in 1:nϵ
-            ϵ_val = ϵ_grid[ϵ_index]
+        c_policy_t = create_dual_compatible_array(T, nk, nz)
+        for ϵ_index in 1:nz
+            ϵ_val = z_grid[ϵ_index]
             for k_index in 1:nk
                 k_val = k_grid[k_index]
                 # Fix: Add ē to labor income
@@ -192,9 +192,9 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         end
         
         # Derive future consumption policy
-        c_policy_t′ = create_dual_compatible_array(T, nk, nϵ)
-        for ϵ_index in 1:nϵ
-            ϵ_val = ϵ_grid[ϵ_index]
+        c_policy_t′ = create_dual_compatible_array(T, nk, nz)
+        for ϵ_index in 1:nz
+            ϵ_val = z_grid[ϵ_index]
             for k_index in 1:nk
                 k_val = k_grid[k_index]
                 # Fix: Add ē to labor income
@@ -203,8 +203,8 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         end
         
         # Compute interpolated policy on histogram grid
-        k_pol_hist_t = create_dual_compatible_array(T, n_hist, nϵ)
-        for ϵ_index in 1:nϵ
+        k_pol_hist_t = create_dual_compatible_array(T, n_hist, nz)
+        for ϵ_index in 1:nz
             for k_hist_index in 1:n_hist
                 k_val = k_hist[k_hist_index]
                 k_pol_hist_t[k_hist_index, ϵ_index] = safe_pchip(k_grid, k_policy_t[:, ϵ_index], k_val)
@@ -217,9 +217,9 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         end
         
         # Law of motion for the distribution
-        μ_next = create_dual_compatible_array(T, n_hist, nϵ)
-        for ϵ′_index in 1:nϵ
-            for ϵ_index in 1:nϵ
+        μ_next = create_dual_compatible_array(T, n_hist, nz)
+        for ϵ′_index in 1:nz
+            for ϵ_index in 1:nz
                 trans_prob = M[ϵ_index, ϵ′_index]
                 for k_index in 1:n_hist
                     k′ = k_pol_hist_t[k_index, ϵ_index]
@@ -253,8 +253,8 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         # ---------- Improved handling of borrowing constraints and Euler equations ----------
         
         # Household optimization with smooth transition between regimes
-        euler_errors = create_dual_compatible_array(T, nk, nϵ)
-        for ϵ_index in 1:nϵ
+        euler_errors = create_dual_compatible_array(T, nk, nz)
+        for ϵ_index in 1:nz
             for k_index in 1:nk
                 c_current = c_policy_t[k_index, ϵ_index]
                 k_next = k_policy_t[k_index, ϵ_index]
@@ -265,7 +265,7 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
                 # Compute standard Euler equation
                 # Expected marginal utility tomorrow
                 expected_muc = zero(T)
-                for ϵ′_index in 1:nϵ
+                for ϵ′_index in 1:nz
                     # Interpolate consumption given k_next
                     c_next = safe_pchip(k_grid, c_policy_t′[:, ϵ′_index], k_next)
                     
@@ -294,8 +294,8 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         # Collect all equilibrium conditions in a vector
         # For the distribution, only include equations for the first n_hist-1 elements of each ϵ column
         # This avoids the redundant equations
-        μ_diff_reduced = create_dual_compatible_array(T, n_hist-1, nϵ)
-        for ϵ_index in 1:nϵ
+        μ_diff_reduced = create_dual_compatible_array(T, n_hist-1, nz)
+        for ϵ_index in 1:nz
             for k_index in 1:(n_hist-1)
                 μ_diff_reduced[k_index, ϵ_index] = μ_t′[k_index, ϵ_index] - μ_next[k_index, ϵ_index]
             end
@@ -485,14 +485,14 @@ Returns:
 - K: Aggregate capital
 """
 function compute_aggregate_capital(prim, x)
-    @unpack k_hist, n_hist, nϵ, unemp = prim
+    @unpack k_hist, n_hist, nz, unemp = prim
     
     Z = x[1]
     μ_flat_reduced = x[2:end]
     
-    μ = zeros(n_hist, nϵ)
+    μ = zeros(n_hist, nz)
     idx = 1
-    for ϵ_idx in 1:nϵ
+    for ϵ_idx in 1:nz
         for k_idx in 1:(n_hist-1)
             μ[k_idx, ϵ_idx] = μ_flat_reduced[idx] 
             idx += 1
@@ -503,7 +503,7 @@ function compute_aggregate_capital(prim, x)
     end
     
     # Compute aggregate capital
-    K = sum(k_hist[k_idx] * μ[k_idx, ϵ_idx] for ϵ_idx in 1:nϵ for k_idx in 1:n_hist)
+    K = sum(k_hist[k_idx] * μ[k_idx, ϵ_idx] for ϵ_idx in 1:nz for k_idx in 1:n_hist)
     return K
 end
 
@@ -576,9 +576,9 @@ function calculate_reiter_irfs(prim, res_ss, system, g_x, h_x; shock_size=0.01, 
         # For capital variance, we need to compute the distribution's second moment
         # Reconstruct distribution from state vector
         μ_flat_reduced = x_t[2:end]
-        μ_t = zeros(prim.n_hist, prim.nϵ)
+        μ_t = zeros(prim.n_hist, prim.nz)
         idx = 1
-        for ϵ_idx in 1:prim.nϵ
+        for ϵ_idx in 1:prim.nz
             # Set the first n_hist-1 elements for each ϵ
             for k_idx in 1:(prim.n_hist-1)
                 μ_t[k_idx, ϵ_idx] = μ_flat_reduced[idx]
@@ -593,7 +593,7 @@ function calculate_reiter_irfs(prim, res_ss, system, g_x, h_x; shock_size=0.01, 
         
         # Calculate capital variance
         K_var_t = 0.0
-        for ϵ_idx in 1:prim.nϵ
+        for ϵ_idx in 1:prim.nz
             for k_idx in 1:prim.n_hist
                 K_var_t += μ_t[k_idx, ϵ_idx] * (prim.k_hist[k_idx] - K_t)^2
             end
@@ -605,7 +605,7 @@ function calculate_reiter_irfs(prim, res_ss, system, g_x, h_x; shock_size=0.01, 
         else
             # Calculate steady state K_var
             K_var_ss = 0.0
-            for ϵ_idx in 1:prim.nϵ
+            for ϵ_idx in 1:prim.nz
                 for k_idx in 1:prim.n_hist
                     K_var_ss += res_ss.μ[k_idx, ϵ_idx] * (prim.k_hist[k_idx] - K)^2
                 end
@@ -619,13 +619,13 @@ end
 
 
 function compute_capital_variance(prim, x, K)
-    @unpack k_hist, n_hist, nϵ, unemp = prim
+    @unpack k_hist, n_hist, nz, unemp = prim
     
     # Extract and reconstruct distribution
     μ_flat_reduced = x[2:end]
-    μ = zeros(n_hist, nϵ)
+    μ = zeros(n_hist, nz)
     idx = 1
-    for ϵ_idx in 1:nϵ
+    for ϵ_idx in 1:nz
         for k_idx in 1:(n_hist-1)
             μ[k_idx, ϵ_idx] = max(0.0, μ_flat_reduced[idx])
             idx += 1
@@ -645,7 +645,7 @@ function compute_capital_variance(prim, x, K)
     
     # Compute variance
     K_var = 0.0
-    for ϵ_idx in 1:nϵ
+    for ϵ_idx in 1:nz
         for k_idx in 1:n_hist
             K_var += μ[k_idx, ϵ_idx] * (k_hist[k_idx] - K)^2
         end

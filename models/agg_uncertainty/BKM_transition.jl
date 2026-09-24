@@ -2,10 +2,11 @@
 # using the method of Boppart, Krusell, and Mitman (2018).
 
 
-using Parameters, LinearAlgebra, Random, Optim
+using Parameters, LinearAlgebra, Random, Optim, SparseArrays
+using Spline # custom spline package
 
-include("spline.jl")
-include("Aiyagari_EGM.jl")
+# Steady state household block. Its idiosyncratic employment state ϵ is stored as z_grid / nz.
+include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
 
 @with_kw struct Simulation
     # TFP parameters
@@ -77,8 +78,8 @@ function InitializeTransition(prim::Primitives, res_ss::Results; T=300, Z_shock=
     end
     
     # Initialize policy functions - start with steady state policies
-    k_policy_path = zeros(nk, nϵ, T+1)
-    c_policy_path = zeros(nk, nϵ, T+1)
+    k_policy_path = zeros(nk, nz, T+1)
+    c_policy_path = zeros(nk, nz, T+1)
     
     # At time T+1, we assume we're back at steady state
     k_policy_path[:, :, T+1] .= res_ss.k_policy
@@ -89,11 +90,11 @@ function InitializeTransition(prim::Primitives, res_ss::Results; T=300, Z_shock=
     c_splines_path = [deepcopy(res_ss.c_splines) for _ in 1:T+1]
     
     # Initialize histogram policies
-    k_pol_hist_path = zeros(n_hist, nϵ, T+1)
+    k_pol_hist_path = zeros(n_hist, nz, T+1)
     k_pol_hist_path[:, :, T+1] .= res_ss.k_pol_hist
     
     # Initialize distribution
-    μ_path = zeros(n_hist, nϵ, T+1)
+    μ_path = zeros(n_hist, nz, T+1)
     μ_path[:, :, 1] .= res_ss.μ  # Start at steady state distribution
 
     # Initialize other aggregates
@@ -137,10 +138,10 @@ function BellmanTransition(prim::Primitives, res_tr::TransitionResults, sim::Sim
     
     
     # Initialize current period's policies
-    k_next = zeros(prim.nk, prim.nϵ)
-    c_next = zeros(prim.nk, prim.nϵ)
+    k_next = zeros(prim.nk, prim.nz)
+    c_next = zeros(prim.nk, prim.nz)
     
-    for (ϵ_index, ϵ) in enumerate(ϵ_grid)
+    for (ϵ_index, ϵ) in enumerate(z_grid)
         p = M[ϵ_index, :]
         
         # Calculate expected marginal utility next period
@@ -185,15 +186,15 @@ function BackwardIteration!(prim::Primitives, res_tr::TransitionResults, sim::Si
         res_tr.c_policy_path[:, :, t] = c_next
         
         # Update splines
-        k_splines = [PchipSpline(k_grid, k_next[:, ϵ_index]) for ϵ_index in eachindex(ϵ_grid)]
-        c_splines = [PchipSpline(k_grid, c_next[:, ϵ_index]) for ϵ_index in eachindex(ϵ_grid)]
+        k_splines = [PchipSpline(k_grid, k_next[:, ϵ_index]) for ϵ_index in eachindex(z_grid)]
+        c_splines = [PchipSpline(k_grid, c_next[:, ϵ_index]) for ϵ_index in eachindex(z_grid)]
         
         res_tr.k_splines_path[t] = k_splines
         res_tr.c_splines_path[t] = c_splines
         
         # Update policy on histogram grid
-        k_pol_hist = zeros(prim.n_hist, prim.nϵ)
-        for ϵ_index in eachindex(ϵ_grid)
+        k_pol_hist = zeros(prim.n_hist, prim.nz)
+        for ϵ_index in eachindex(z_grid)
             k_pol_hist[:, ϵ_index] = evaluate_spline(k_splines[ϵ_index], k_hist)
         end
         res_tr.k_pol_hist_path[:, :, t] = k_pol_hist
@@ -208,13 +209,13 @@ function ForwardIteration!(prim::Primitives, res_tr::TransitionResults, sim::Sim
     # We already have μ_path[:, :, 1] as steady state
     # Now iterate forward from t=1 to T
     for t in 1:T
-        μ_next = zeros(n_hist, nϵ)
+        μ_next = zeros(n_hist, nz)
         
-        for ϵ_index in eachindex(prim.ϵ_grid)
+        for ϵ_index in eachindex(prim.z_grid)
             for k_index in eachindex(k_hist)
                 k_prime = res_tr.k_pol_hist_path[k_index, ϵ_index, t]
                 
-                for ϵ_next in eachindex(prim.ϵ_grid)
+                for ϵ_next in eachindex(prim.z_grid)
                     if k_prime < k_min
                         μ_next[1, ϵ_next] += M[ϵ_index, ϵ_next] * res_tr.μ_path[k_index, ϵ_index, t]
                     elseif k_prime > k_max
@@ -333,8 +334,8 @@ function CalculateAggregatesTransition!(prim::Primitives, res_tr::TransitionResu
 
     for t in 1:sim.T+1
         # Get the consumption policy on the histogram grid for time t
-        c_pol_hist = zeros(n_hist, nϵ)
-        for ϵ_index in eachindex(ϵ_grid)
+        c_pol_hist = zeros(n_hist, nz)
+        for ϵ_index in eachindex(z_grid)
             c_pol_hist[:, ϵ_index] = evaluate_spline(c_splines_path[t][ϵ_index], k_hist)
         end
 
@@ -384,7 +385,7 @@ end
 # Main function to solve the model with BKM method
 function SolveModelTransition(; T=300, Z_shock=.01)
     # First solve the steady state model
-    prim, res_ss = SolveModel(; k_min=1e-6, k_max = 60.0, nk=60, n_hist=125)
+    prim, res_ss = solve_model(; k_min=1e-6, k_max = 60.0, nk=60, n_hist=125)
 
     # Solve for transition path
     sim, res_tr = SolveTransitionPath(prim, res_ss; T, Z_shock)
@@ -408,10 +409,22 @@ function SolveTransition_from_SS(prim::Primitives, res_ss::Results; T=300, Z_sho
     return sim, res_tr
 end
 
+# Steady state variance of log consumption (Aiyagari_EGM.jl does not store log-consumption moments)
+function SteadyStateLogCVar(prim::Primitives, res_ss::Results)
+    c_pol_hist = zeros(prim.n_hist, prim.nz)
+    for ϵ_index in eachindex(prim.z_grid)
+        c_pol_hist[:, ϵ_index] = evaluate_spline(res_ss.c_splines[ϵ_index], prim.k_hist)
+    end
+    log_c = log.(max.(c_pol_hist, 1e-12))
+    C_log_mean = res_ss.μ ⋅ log_c
+    return res_ss.μ ⋅ (log_c .- C_log_mean).^2
+end
+
 function ComputeIRFs(prim::Primitives, res_ss::Results, res_tr::TransitionResults, sim::Simulation; use_levels::Bool=false)
     @unpack_Primitives prim
-    @unpack_Results res_ss 
+    @unpack_Results res_ss
     @unpack_TransitionResults res_tr
+    C_log_var = SteadyStateLogCVar(prim, res_ss)
 
     if use_levels
         # For level deviations: normalize by LOG of the shock
@@ -569,7 +582,7 @@ savefig("K_var_transition.png")
 #    linewidth=2, xlabel="Time", ylabel="% Deviation from Steady State", dpi=300)
 
 #=
-prim, res_ss = SolveModel();
+prim, res_ss = solve_model();
 
 # 1. Define the different shock sizes you want to test
 shock_sizes = [0.001, 0.01, 0.10, 0.25, 0.5] # 0.01%, 0.1%, 1%, 10%

@@ -4,11 +4,11 @@ using Plots, Parameters, LinearAlgebra, Optim, DelimitedFiles
 include("OLG_functions.jl")
 
 # read in age - efficiency profile from ef.txt
-ef = readdlm("OLG/ef.txt", '\t')[:,1]
+ef = readdlm(joinpath(@__DIR__, "ef.txt"), '\t')[:,1]
 
 plot(ef, xlabel="Model Age", label="", ylabel="Deterministic Efficiency", 
 title="Age-Efficiency Profile", lw=1.5, dpi=400)
-savefig("OLG/ef.png")
+savefig(joinpath(@__DIR__, "ef.png"))
 
 
 #########################################################################
@@ -144,11 +144,11 @@ end
 
 bins, heights = histogram_from_pmf(F_collapsed, prim.a_grid, 30)
 bar(bins, heights, label="", xlabel="Wealth", ylabel="Density", title="Wealth Distribution With SS")
-savefig("OLG/wealth_dist.png")
+savefig(joinpath(@__DIR__, "wealth_dist.png"))
 
 bins2, heights2 = histogram_from_pmf(F_collapsed2, prim2.a_grid, 30)
 bar(bins2, heights2, label="", xlabel="Wealth", ylabel="Density", title="Wealth Distribution Without SS", color=:green)
-savefig("OLG/wealth_dist2.png")
+savefig(joinpath(@__DIR__, "wealth_dist2.png"))
 
 
 bins3, heights3 = histogram_from_pmf(F_collapsed3, prim2.a_grid, 30)
@@ -314,7 +314,7 @@ plot!(percent_pop2, percent_wealth2, label="Lorenz Curve without SS", linewidth=
 plot!([0, 1], [0, 1], label="Perfect Equality",
     linewidth=2, linestyle=:dash, linecolor=:red)
 
-savefig("OLG/lorenz.png")
+savefig(joinpath(@__DIR__, "lorenz.png"))
 
 plot!(percent_pop3, percent_wealth3, label="Lorenz Curve without SS, but with SS prices", linewidth=2, linecolor=:purple)
 
@@ -324,11 +324,11 @@ title="Gini Coefficient by Age", lw=1.5, dpi=400)
 
 plot!(2:prim2.N, gini_age2, label="Without Social Security", lw=1.5)
 
-savefig("OLG/gini_age.png")
+savefig(joinpath(@__DIR__, "gini_age.png"))
 
 plot!(2:prim2.N, gini_age3, label="Without Social Security, but with SS prices", lw=1.5)
 
-savefig("OLG/gini_age2.png")
+savefig(joinpath(@__DIR__, "gini_age2.png"))
 
 plot!(1:prim.N, consumption_gini, label="With Social Security",)
 plot!(1:prim2.N, consumption_gini2, label="Without Social Security", lw=1.5)
@@ -348,7 +348,7 @@ end
 
 plot(1:prim.N, mean_a_age, label="With SS", xlabel="Model Age", ylabel="Mean Assets", title="Mean Assets by Age", lw=1.5, dpi=400)
 plot!(1:prim2.N, mean_a_age2, label="Without SS", lw=1.5, legend=:topleft)
-savefig("OLG/mean_assets_age.png")
+savefig(joinpath(@__DIR__, "mean_assets_age.png"))
 
 mean_c_age = zeros(prim.N)
 mean_c_age2 = zeros(prim2.N)
@@ -366,4 +366,4 @@ end
 
 plot(1:prim.N, mean_c_age, label="With SS", xlabel="Model Age", ylabel="Mean Consumption", title="Mean Consumption by Age", lw=1.5, dpi=400)
 plot!(1:prim2.N, mean_c_age2, label="Without SS", lw=1.5, legend=:topright)
-savefig("OLG/mean_consumption_age.png")
+savefig(joinpath(@__DIR__, "mean_consumption_age.png"))
