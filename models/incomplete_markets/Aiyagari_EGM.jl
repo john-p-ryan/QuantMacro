@@ -3,6 +3,7 @@
 
 @with_kw struct Primitives
     β::Float64 = 0.99
+    γ::Float64 = 1.0  # coefficient of relative risk aversion (γ = 1 is log utility)
     α::Float64 = 0.36
     δ::Float64 = 0.025
     ē::Float64 = 0.3271
@@ -13,13 +14,16 @@
     unemp::Float64 = M[1, 2] / (M[1, 2] + M[2, 1])
     L = ē * (1 - unemp) # Fixed in Aiyagari because no aggregate uncertainty & exogenous labor supply
 
-    k_grid::Vector{Float64} = make_grid(1e-6, 60.0, 100; density=2.0)
-    k_min::Float64 = minimum(k_grid)
-    k_max::Float64 = maximum(k_grid)
-    nk::Int64 = length(k_grid)
+    # set the grids through k_min, k_max, nk, k_density, and n_hist.
+    k_min::Float64 = 1e-6     # borrowing constraint (≈ 0, kept positive so c and k stay interior)
+    k_max::Float64 = 60.0
+    nk::Int64 = 60
+    k_density::Float64 = 2.0  # curvature > 1 clusters points near k_min, where the policy functions bend
+    k_grid::Vector{Float64} = make_grid(k_min, k_max, nk; density=k_density)
+    @assert k_grid[1] ≈ k_min && k_grid[end] ≈ k_max && length(k_grid) == nk "k_grid must span [k_min, k_max] with nk points"
 
-    k_hist::Vector{Float64} = make_grid(k_min, k_max, 250; density=1.0)
-    n_hist::Int64 = length(k_hist)
+    n_hist::Int64 = 125
+    k_hist::Vector{Float64} = make_grid(k_min, k_max, n_hist; density=1.0)
 end
 
 
@@ -45,31 +49,33 @@ end
     C_cv::Float64                         # coefficient of variation of consumption
 end
 
-function u(c; ε=1e-7)
+# CRRA utility, normalized as (c^(1-γ) - 1) / (1-γ) so that it nests log utility at γ = 1.
+# expm1 keeps the normalization accurate for γ near 1. Below ε, u is extended linearly.
+function u(c, γ; ε=1e-7)
     if c < ε
-        return log(ε) + (c-ε)/ε
-    else 
+        return u(ε, γ; ε=ε) + (c - ε) / ε^γ  # slope u'(ε) = ε^(-γ)
+    elseif γ == 1
         return log(c)
+    else
+        return expm1((1 - γ) * log(c)) / (1 - γ)
     end
 end
 
-function u_prime(c; ε=1e-7)
-    return 1.0 / max(c, ε)
+function u_prime(c, γ; ε=1e-7)
+    c = max(c, ε)
+    return γ == 1 ? 1 / c : c^(-γ)
 end
 
-function u_prime_inv(x)
+function u_prime_inv(x, γ)
     if x > 0
-        return 1 / x
+        return γ == 1 ? 1 / x : x^(-1 / γ)
     else
         error("invalid marginal utility value")
     end
 end
 
 
-function initialize(;k_min=1e-6, k_max=60.0, nk=100, n_hist=125)
-    prim = Primitives(k_min=k_min, k_max=k_max, nk=nk, n_hist=n_hist,
-                      k_grid=make_grid(k_min, k_max, nk; density=2.0),
-                      k_hist=make_grid(k_min, k_max, n_hist; density=1.0))
+function initialize(prim::Primitives)
     @unpack_Primitives prim
 
     K = 11.6
@@ -97,7 +103,7 @@ function initialize(;k_min=1e-6, k_max=60.0, nk=100, n_hist=125)
     C, Y, K_var, K_cv, C_var, C_cv = zeros(6)
 
     res = Results(k_policy, c_policy, V, k_splines, c_splines, k_pol_hist, T_star, K, w, r, μ, C, Y, K_var, K_cv, C_var, C_cv)
-    return prim, res
+    return res
 end
 
 
@@ -112,9 +118,9 @@ function bellman(prim::Primitives, res::Results)
     for (z_index, z) in enumerate(z_grid)
         p = M[z_index, :]
         # calculate expected value function (derivative) on grid
-        EMU_prime = u_prime.(c_policy) * p
+        EMU_prime = u_prime.(c_policy, γ) * p
         # get consumption today (off grid) from Euler equation
-        c_today = u_prime_inv.(β * (1+r-δ) * EMU_prime)
+        c_today = u_prime_inv.(β * (1+r-δ) * EMU_prime, γ)
         # get capital tomorrow (off grid) from budget constraint
         k_today = (c_today + k_grid .- w * ē * z) / (1+r-δ)
         # interpolate consumption policy function to get back on the grid, save the spline
@@ -345,7 +351,7 @@ function recover_V!(prim::Primitives, res::Results; tol=1e-10, max_iter=20_000)
     V = if maximum(abs.(res.V)) > 0
         copy(res.V)
     else
-        u.(res.c_policy) ./ (1 - β)
+        u.(res.c_policy, γ) ./ (1 - β)
     end
 
     err = Inf
@@ -363,10 +369,11 @@ function recover_V!(prim::Primitives, res::Results; tol=1e-10, max_iter=20_000)
             @inbounds for zp in 1:nz
                 EV .+= M[z_idx, zp] .* evaluate_spline(V_spl[zp], kprime)
             end
-            V_new[:, z_idx] = u.(res.c_policy[:, z_idx]) .+ β .* EV
+            V_new[:, z_idx] = u.(res.c_policy[:, z_idx], γ) .+ β .* EV
         end
 
-        err = maximum(abs.(V_new .- V))
+        # relative criterion: for γ > 1, V near c ≈ 0 is so large that an absolute tolerance is below machine precision
+        err = maximum(abs.(V_new .- V) ./ (1 .+ abs.(V)))
         V = V_new
         iter += 1
     end
@@ -382,8 +389,11 @@ end
 
 
 
-function solve_model(; k_min=1e-6, k_max=50.0, nk=60, n_hist=125)
-    prim, res = initialize(k_min=k_min, k_max=k_max, nk=nk, n_hist=n_hist)
+# Keyword arguments override the Primitives defaults, e.g. solve_model(; γ=2.0, nk=100)
+solve_model(; kwargs...) = solve_model(Primitives(; kwargs...))
+
+function solve_model(prim::Primitives)
+    res = initialize(prim)
     steady_state_capital!(prim, res)
     calculate_aggregates!(prim, res)
     recover_V!(prim, res; tol=1e-12)

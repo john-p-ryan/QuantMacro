@@ -30,10 +30,13 @@ using Parameters, LinearAlgebra, Random, Interpolations, Optim, Statistics
 
 
 
+
 ######################### Part 1 - setup model #########################
 
 @with_kw struct Primitives
     β::Float64 = 0.99
+    γ::Float64 = 1.0  # coefficient of relative risk aversion (γ = 1 is log utility)
+    @assert γ > 0 "γ must be positive"
     α::Float64 = 0.36
     δ::Float64 = 0.025
     ē::Float64 = 0.3271
@@ -46,12 +49,14 @@ using Parameters, LinearAlgebra, Random, Interpolations, Optim, Statistics
     ϵ_grid::Vector{Float64} = [1, 0]
     nϵ::Int64 = length(ϵ_grid)
 
-    nk::Int64 = 60          # keep it small for testing, increase for final solution
-    k_min::Float64 = 0.00001
-    k_max::Float64 = 30.0
+    # Grid defaults match the other Aiyagari and aggregate uncertainty solvers. The k grid is uniform, not
+    # curved like the other methods', because bilinear_interp requires evenly spaced grids.
+    nk::Int64 = 60
+    k_min::Float64 = 1e-6
+    k_max::Float64 = 60.0
     k_grid::Vector{Float64} = range(k_min, stop=k_max, length=nk)
 
-    nK::Int64 = 10         # keep it small for testing, increase for final solution
+    nK::Int64 = 30
     K_min::Float64 = 10.0
     K_max::Float64 = 13.0
     K_grid::Vector{Float64} = range(K_min, stop=K_max, length=nK)
@@ -260,10 +265,31 @@ function DrawShocks(prim::Primitives, sho::Shocks, sim::Simulations)
 end
 
 
-function Initialize()
-    prim = Primitives()
-    sho = Shocks()
-    sim = Simulations()
+function split_kwargs(kwargs, types...)
+    #=
+    Route flat keyword arguments to the parameter structs whose fields they name
+
+    Args
+    kwargs: keyword arguments, e.g. (γ=2.0, u_g=0.05, seed=1)
+    types: parameter struct types, e.g. Primitives, Shocks, Simulations
+
+    Returns
+    Tuple of NamedTuples, one per type, holding the keywords that are fields of that type
+    =#
+    unknown = setdiff(keys(kwargs), fieldnames.(types)...)
+    isempty(unknown) || throw(ArgumentError("unknown parameter(s): $(join(unknown, ", "))"))
+    return map(T -> (; (k => v for (k, v) in pairs(kwargs) if k in fieldnames(T))...), types)
+end
+
+
+function Initialize(; kwargs...)
+    #=
+    Keyword arguments override the defaults of Primitives, Shocks, or Simulations, e.g. Initialize(; γ=2.0, nK=20, seed=1)
+    =#
+    prim_kw, sho_kw, sim_kw = split_kwargs(kwargs, Primitives, Shocks, Simulations)
+    prim = Primitives(; prim_kw...)
+    sho = Shocks(; sho_kw...)
+    sim = Simulations(; sim_kw...)
     Z, E = DrawShocks(prim, sho, sim)
 
     V = zeros(prim.nk, prim.nϵ, prim.nK, prim.nz)
@@ -296,12 +322,18 @@ end
 ######################### Part 3 - HH Problem #########################
 
 
-function u(c::Float64; ε::Float64 = .0001)
-    if c > ε
-        return log(c)
-    else # a linear approximation stitching function
+function u(c::Float64, γ::Float64; ε::Float64 = .0001)
+    #=
+    CRRA utility, normalized as (c^(1-γ) - 1) / (1-γ) so that it nests log utility at γ = 1.
+    expm1 keeps the normalization accurate for γ near 1.
+    =#
+    if c < ε # a linear approximation stitching function
         # ensures obj is smooth and defined for optimization when c is very small
-        return log(ε) + (c - ε) / ε
+        return u(ε, γ; ε=ε) + (c - ε) / ε^γ  # slope u'(ε) = ε^(-γ)
+    elseif γ == 1
+        return log(c)
+    else
+        return expm1((1 - γ) * log(c)) / (1 - γ)
     end
 end
 
@@ -390,12 +422,12 @@ function Bellman(prim::Primitives, res::Results, sho::Shocks)
                                   p[3]*Vb1_interp(k_prime, K_prime) + 
                                   p[4]*Vb0_interp(k_prime, K_prime)
 
-                        return -(u(c) + β*EV_next)
+                        return -(u(c, γ) + β*EV_next)
                     end
 
                     opt = optimize(obj, 0.0, budget)
 
-                    if opt.converged
+                    if Optim.converged(opt)
                         V_next[k_index, ϵ_index, K_index, z_index] = -opt.minimum
                         k_next[k_index, ϵ_index, K_index, z_index] = opt.minimizer
                     else
@@ -433,7 +465,8 @@ function VFI(prim::Primitives, res::Results, sho::Shocks, sim::Simulations)
 
     while error > V_tol && iter < V_max_iter
         V_next, k_next = Bellman(prim, res_next, sho)
-        error = maximum(abs.(V_next - res_next.V))
+        # relative criterion: for γ > 1, V near c ≈ 0 is so large that an absolute tolerance is below machine precision
+        error = maximum(abs.(V_next .- res_next.V) ./ (1 .+ abs.(res_next.V)))
         res_next.V = V_next
         res_next.k_policy = k_next
         iter += 1
@@ -560,15 +593,18 @@ function EstimateRegression(prim::Primitives, res::Results, sim::Simulations)
 end
 
 
-function SolveModel()
+function SolveModel(; kwargs...)
     #=
     Solve the Krusell-Smith model by iterating on the law of motion for capital
 
+    Args
+    kwargs: overrides for any field of Primitives, Shocks, or Simulations, e.g. SolveModel(; γ=2.0, nk=100)
+
     Returns
-    res (Results): results struct
+    prim, sho, sim, res: parameter structs and results struct
     =#
 
-    prim, sho, sim, res = Initialize()
+    prim, sho, sim, res = Initialize(; kwargs...)
     @unpack_Primitives prim
     @unpack_Shocks sho
     @unpack_Simulations sim

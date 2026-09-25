@@ -13,85 +13,7 @@ module EGM
 end
 
 
-# --------------------- Baseline Comparison ---------------------#
-
-# Baseline values
-k_max = 40.0
-nk = 800
-n_hist = nk  # for EGM
-
-
-@time prim_egm, res_egm = EGM.solve_model(k_max=k_max, nk=nk, n_hist=n_hist)
-
-@time prim_gs, res_gs = gridsearch.solve_model(k_max=k_max, nk=nk)
-
-# plot capital policy functions
-plot(prim_gs.k_grid, res_gs.k_policy, label=["GS - ϵ high" "GS - ϵ low"], xlabel="k", ylabel="k'", legend=:bottomright)
-plot!(prim_egm.k_grid, res_egm.k_policy, linestyle=:dash, label=["EGM - ϵ high" "EGM - ϵ low"])
-# plot 45 degree line
-plot!(prim_gs.k_grid, prim_gs.k_grid, linestyle=:dot, color=:black, label="45° line", title="Capital Policy Function Comparison")
-
-
-# plot the savings function k' - k
-plot(prim_gs.k_grid, res_gs.k_policy[:, 1] .- prim_gs.k_grid, label="GS - ϵ high", xlabel="k", ylabel="Savings (k' - k)", legend=:bottomright)
-plot!(prim_gs.k_grid, res_gs.k_policy[:, 2] .- prim_gs.k_grid, label="GS - ϵ low")
-plot!(prim_egm.k_grid, res_egm.k_policy[:, 1] .- prim_egm.k_grid, linestyle=:dash, label="EGM - ϵ high")
-plot!(prim_egm.k_grid, res_egm.k_policy[:, 2] .- prim_egm.k_grid, linestyle=:dash, label="EGM - ϵ low")
-#hline!(0.0, linestyle=:dot, color=:black, label="Zero Savings Line", title="Savings Function Comparison")
-
-
-
-# plot consumption policy functions
-plot(prim_gs.k_grid, res_gs.c_policy, label=["GS - ϵ high" "GS - ϵ low"], xlabel="k", ylabel="c", legend=:bottomright)
-plot!(prim_egm.k_grid, res_egm.c_policy, linestyle=:dash, label=["EGM - ϵ high" "EGM - ϵ low"], title="Consumption Policy Functions")
-
-
-# plot the marginal pdf of capital holdings
-μ_combined_gs = sum(res_gs.μ, dims=2)
-μ_combined_egm = sum(res_egm.μ, dims=2)
-
-
-plot(prim_gs.k_grid, μ_combined_gs, label="GS", xlabel="k", ylabel="Density", legend=:topright, lw=2)
-plot!(prim_gs.k_grid, μ_combined_egm, linestyle=:dash, label="EGM", lw=2)
-
-
-
-
-
-
-# ------------------------ Compare grid search with finer grids to EGM coarse grid ------------------------#
-
-k_max = 100.0
-nk_fine = 20000
-n_hist = 2000
-nk_egm = 1000
-
-@time prim_egm_coarse, res_egm_coarse = EGM.solve_model(k_max=k_max, nk=nk_egm, n_hist=n_hist)
-
-@time prim_gs_fine, res_gs_fine = gridsearch.solve_model(k_max=k_max, nk=nk_fine)
-
-
-# plot capital policy functions
-plot(prim_gs_fine.k_grid, res_gs_fine.k_policy, label=["GS - ϵ high" "GS - ϵ low"], xlabel="k", ylabel="k'", legend=:bottomright)
-plot!(prim_egm_coarse.k_grid, res_egm_coarse.k_policy, linestyle=:dash, label=["EGM - ϵ high" "EGM - ϵ low"])
-# plot 45 degree line
-plot!(prim_gs_fine.k_grid, prim_gs_fine.k_grid, linestyle=:dot, color=:black, label="45° line", title="Capital Policy Function Comparison (Fine Grid vs Coarse Grid)")
-
-# plot the savings function k' - k
-plot(prim_gs_fine.k_grid, res_gs_fine.k_policy[:, 1] .- prim_gs_fine.k_grid, label="GS - ϵ high", xlabel="k", ylabel="Savings (k' - k)", legend=:topright)
-plot!(prim_gs_fine.k_grid, res_gs_fine.k_policy[:, 2] .- prim_gs_fine.k_grid, label="GS - ϵ low")
-plot!(prim_egm_coarse.k_grid, res_egm_coarse.k_policy[:, 1] .- prim_egm_coarse.k_grid, linestyle=:dash, label="EGM - ϵ high")
-plot!(prim_egm_coarse.k_grid, res_egm_coarse.k_policy[:, 2] .- prim_egm_coarse.k_grid, linestyle=:dash, label="EGM - ϵ low")
-#hline!(0.0, linestyle=:dot, color=:black, label="Zero Savings Line", title="Savings Function Comparison")
-
-# plot consumption policy functions
-plot(prim_gs_fine.k_grid, res_gs_fine.c_policy, label=["GS - ϵ high" "GS - ϵ low"], xlabel="k", ylabel="c", legend=:bottomright)
-plot!(prim_egm_coarse.k_grid, res_egm_coarse.c_policy, linestyle=:dash, label=["EGM - ϵ high" "EGM - ϵ low"])
-
-# plot the marginal pdf of capital holdings
-μ_combined_gs_fine = sum(res_gs_fine.μ, dims=2)
-μ_combined_egm_coarse = sum(res_egm_coarse.μ, dims=2)
-# correct for different grid spacing
+# Moves a pmf between grids through its CDF, so distributions on grids with different spacing are comparable
 function resample_pdf(pdf_original::AbstractVector{<:Real},
                       grid_original::AbstractVector{<:Real},
                       grid_new::AbstractVector{<:Real})
@@ -127,6 +49,82 @@ function resample_pdf(pdf_original::AbstractVector{<:Real},
 
     return pdf_new
 end
+
+
+# --------------------- Baseline Comparison ---------------------#
+
+# Both methods use their default grids, which share the same bounds
+@time prim_egm, res_egm = EGM.solve_model()
+
+@time prim_gs, res_gs = gridsearch.solve_model()
+
+# plot capital policy functions
+plot(prim_gs.k_grid, res_gs.k_policy, label=["GS - ϵ high" "GS - ϵ low"], xlabel="k", ylabel="k'", legend=:bottomright)
+plot!(prim_egm.k_grid, res_egm.k_policy, linestyle=:dash, label=["EGM - ϵ high" "EGM - ϵ low"])
+# plot 45 degree line
+plot!(prim_gs.k_grid, prim_gs.k_grid, linestyle=:dot, color=:black, label="45° line", title="Capital Policy Function Comparison")
+
+
+# plot the savings function k' - k
+plot(prim_gs.k_grid, res_gs.k_policy[:, 1] .- prim_gs.k_grid, label="GS - ϵ high", xlabel="k", ylabel="Savings (k' - k)", legend=:bottomright)
+plot!(prim_gs.k_grid, res_gs.k_policy[:, 2] .- prim_gs.k_grid, label="GS - ϵ low")
+plot!(prim_egm.k_grid, res_egm.k_policy[:, 1] .- prim_egm.k_grid, linestyle=:dash, label="EGM - ϵ high")
+plot!(prim_egm.k_grid, res_egm.k_policy[:, 2] .- prim_egm.k_grid, linestyle=:dash, label="EGM - ϵ low")
+#hline!(0.0, linestyle=:dot, color=:black, label="Zero Savings Line", title="Savings Function Comparison")
+
+
+
+# plot consumption policy functions
+plot(prim_gs.k_grid, res_gs.c_policy, label=["GS - ϵ high" "GS - ϵ low"], xlabel="k", ylabel="c", legend=:bottomright)
+plot!(prim_egm.k_grid, res_egm.c_policy, linestyle=:dash, label=["EGM - ϵ high" "EGM - ϵ low"], title="Consumption Policy Functions")
+
+
+# plot the marginal pdf of capital holdings
+μ_combined_gs = sum(res_gs.μ, dims=2)
+# the grid search grid is finer than the EGM histogram grid, so move the EGM distribution onto it
+μ_combined_egm = resample_pdf(vec(sum(res_egm.μ, dims=2)), prim_egm.k_hist, prim_gs.k_grid)
+
+
+plot(prim_gs.k_grid, μ_combined_gs, label="GS", xlabel="k", ylabel="Density", legend=:topright, lw=2)
+plot!(prim_gs.k_grid, μ_combined_egm, linestyle=:dash, label="EGM", lw=2)
+
+
+
+
+
+
+# ------------------------ Compare grid search with finer grids to EGM coarse grid ------------------------#
+
+# Only the number of grid points differs from the baseline; the bounds are the defaults
+nk_fine = 20000
+n_hist = 2000
+nk_egm = 1000
+
+@time prim_egm_coarse, res_egm_coarse = EGM.solve_model(nk=nk_egm, n_hist=n_hist)
+
+@time prim_gs_fine, res_gs_fine = gridsearch.solve_model(nk=nk_fine)
+
+
+# plot capital policy functions
+plot(prim_gs_fine.k_grid, res_gs_fine.k_policy, label=["GS - ϵ high" "GS - ϵ low"], xlabel="k", ylabel="k'", legend=:bottomright)
+plot!(prim_egm_coarse.k_grid, res_egm_coarse.k_policy, linestyle=:dash, label=["EGM - ϵ high" "EGM - ϵ low"])
+# plot 45 degree line
+plot!(prim_gs_fine.k_grid, prim_gs_fine.k_grid, linestyle=:dot, color=:black, label="45° line", title="Capital Policy Function Comparison (Fine Grid vs Coarse Grid)")
+
+# plot the savings function k' - k
+plot(prim_gs_fine.k_grid, res_gs_fine.k_policy[:, 1] .- prim_gs_fine.k_grid, label="GS - ϵ high", xlabel="k", ylabel="Savings (k' - k)", legend=:topright)
+plot!(prim_gs_fine.k_grid, res_gs_fine.k_policy[:, 2] .- prim_gs_fine.k_grid, label="GS - ϵ low")
+plot!(prim_egm_coarse.k_grid, res_egm_coarse.k_policy[:, 1] .- prim_egm_coarse.k_grid, linestyle=:dash, label="EGM - ϵ high")
+plot!(prim_egm_coarse.k_grid, res_egm_coarse.k_policy[:, 2] .- prim_egm_coarse.k_grid, linestyle=:dash, label="EGM - ϵ low")
+#hline!(0.0, linestyle=:dot, color=:black, label="Zero Savings Line", title="Savings Function Comparison")
+
+# plot consumption policy functions
+plot(prim_gs_fine.k_grid, res_gs_fine.c_policy, label=["GS - ϵ high" "GS - ϵ low"], xlabel="k", ylabel="c", legend=:bottomright)
+plot!(prim_egm_coarse.k_grid, res_egm_coarse.c_policy, linestyle=:dash, label=["EGM - ϵ high" "EGM - ϵ low"])
+
+# plot the marginal pdf of capital holdings
+μ_combined_gs_fine = sum(res_gs_fine.μ, dims=2)
+μ_combined_egm_coarse = sum(res_egm_coarse.μ, dims=2)
 μ_combined_egm_coarse = resample_pdf(vec(μ_combined_egm_coarse), prim_egm_coarse.k_hist, prim_gs_fine.k_grid)
 plot(prim_gs_fine.k_grid, μ_combined_gs_fine, label="GS", xlabel="k", ylabel="Density", legend=:topright, lw=2)
 plot!(prim_gs_fine.k_grid, μ_combined_egm_coarse, linestyle=:dash, label="EGM", lw=2)

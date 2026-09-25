@@ -24,6 +24,8 @@ end
 
 @with_kw struct Primitives
     β::Float64 = 0.99
+    γ::Float64 = 1.0  # coefficient of relative risk aversion (γ = 1 is log utility)
+    @assert γ > 0 "γ must be positive"
     α::Float64 = 0.36
     δ::Float64 = 0.025
     ē::Float64 = 0.3271
@@ -32,8 +34,12 @@ end
     z_g::Float64 = z_grid[1]
     z_b::Float64 = z_grid[2]
     nz::Int64 = length(z_grid)
-    Mzz::Matrix{Float64} = [0.875 0.125;
-                             0.125 0.875]
+    ρ::Float64 = 0.75       # TFP persistence, the same default as the BKM, Reiter, and SSJ solutions
+    @assert abs(ρ) < 1 "ρ must be in (-1, 1)"
+    # Symmetric two-state chain whose autocorrelation, 2p - 1 with p the probability of staying in a state,
+    # equals ρ, so the discretized process has the same persistence as the linear methods'
+    Mzz::Matrix{Float64} = [(1+ρ)/2 (1-ρ)/2;
+                            (1-ρ)/2 (1+ρ)/2]
 
     ϵ_grid::Vector{Float64} = [1.0, 0.0]
     nϵ::Int64 = length(ϵ_grid)
@@ -41,14 +47,16 @@ end
     unemp::Float64 = M_unemp[1, 2] / (M_unemp[1, 2] + M_unemp[2, 1])
     L::Float64 = ē * (1.0 - unemp)
 
+    # Grid defaults match the Aiyagari solvers, whose steady state initializes KS and the linear methods
     nk::Int64 = 60
-    k_min::Float64 = 1e-5
+    k_min::Float64 = 1e-6
     k_max::Float64 = 60.0
-    k_grid::Vector{Float64} = make_grid(k_min, k_max, nk; density=2.0)
+    k_density::Float64 = 2.0  # curvature > 1 clusters points near k_min, where the policy functions bend
+    k_grid::Vector{Float64} = make_grid(k_min, k_max, nk; density=k_density)
 
     # Grid for histogram method, matched to Aiyagari for initialization
-    k_hist_min::Float64 = 1e-5
-    k_hist_max::Float64 = 60.0
+    k_hist_min::Float64 = k_min
+    k_hist_max::Float64 = k_max
     n_hist::Int64 = 125
     k_hist_grid::Vector{Float64} = make_grid(k_hist_min, k_hist_max, n_hist; density=1.0)
 
@@ -85,16 +93,17 @@ end
     λ::Float64 = 0.382
 end
 
-function u_prime(c; ε=1e-6)
+# CRRA marginal utility c^(-γ); γ = 1 is log utility
+function u_prime(c, γ; ε=1e-6)
     if c > ε
-        return 1/c 
-    else 
-        return 2/ε - c / ε^2
+        return γ == 1 ? 1 / c : c^(-γ)
+    else # first-order Taylor expansion around ε keeps u' finite for c ≤ 0
+        return ε^(-γ) * (1 + γ * (1 - c / ε))
     end
 end
 
-function u_prime_inv(mu)
-    return 1.0 / mu
+function u_prime_inv(mu, γ)
+    return γ == 1 ? 1 / mu : mu^(-1 / γ)
 end
 
 
@@ -110,18 +119,32 @@ function sim_Markov(current_index::Int, M::Matrix{Float64})
     return next_index
 end
 
-function Initialize(;z_grid=[1.01, 0.99], K_min=10.8, K_max=12.4, nK=30, seed=1234)
-    prim = Primitives(z_grid=z_grid, K_min=K_min, K_max=K_max, nK=nK)
-    sim = Simulations(seed=seed)
+# Route flat keyword arguments to the parameter structs whose fields they name; errors on unknown names
+function split_kwargs(kwargs, types...)
+    unknown = setdiff(keys(kwargs), fieldnames.(types)...)
+    isempty(unknown) || throw(ArgumentError("unknown parameter(s): $(join(unknown, ", "))"))
+    return map(T -> (; (k => v for (k, v) in pairs(kwargs) if k in fieldnames(T))...), types)
+end
+
+# Keyword arguments override the Primitives or Simulations defaults, e.g. Initialize(; γ=2.0, nK=20, seed=1)
+function Initialize(; kwargs...)
+    prim_kw, sim_kw = split_kwargs(kwargs, Primitives, Simulations)
+    prim = Primitives(; prim_kw...)
+    sim = Simulations(; sim_kw...)
 
     println("Solving Aiyagari model for initial KS distribution...")
-    # By default, Primitives for Aiyagari and KS now use the same histogram grid
-    prim_ss, res_ss = Aiyagari.solve_model(; 
-        k_min=prim.k_hist_min, 
-        k_max=prim.k_hist_max, 
-        nk=prim.n_hist, 
+    # Solve the same household problem without aggregate risk, on the KS policy and histogram grids
+    # (the Aiyagari model calls the idiosyncratic state z_grid and its transition matrix M)
+    prim_ss, res_ss = Aiyagari.solve_model(;
+        prim.β, prim.γ, prim.α, prim.δ, prim.ē,
+        z_grid=prim.ϵ_grid,
+        M=prim.M_unemp,
+        k_min=prim.k_hist_min,
+        k_max=prim.k_hist_max,
+        nk=prim.nk,
+        k_density=prim.k_density,
         n_hist=prim.n_hist
-    ) 
+    )
     
     # Get initial distribution from the Aiyagari steady state
     initial_μ = res_ss.μ # This is a (n_hist x nϵ) matrix
@@ -207,14 +230,14 @@ function Bellman_EGM(prim::Primitives, res::Results)
                         for (ϵ_prime_idx, ϵ_prime) in enumerate(ϵ_grid)
                             prob_ϵ_trans = M_unemp[ϵ_idx, ϵ_prime_idx]
                             c_prime = evaluate_spline(c_policy_itps[ϵ_prime_idx, z_prime_idx],[k_prime], [K_prime])
-                            RHS_sum += β * (1+r_next-δ) * prob_z_trans * prob_ϵ_trans * u_prime(c_prime[1])
+                            RHS_sum += β * (1+r_next-δ) * prob_z_trans * prob_ϵ_trans * u_prime(c_prime[1], γ)
                         end
                     end
                     Euler_RHS[k_prime_idx] = RHS_sum
                 end
 
                 # 2. Invert Euler to get today's consumption (off-grid)
-                c_today_endog = u_prime_inv.(Euler_RHS)
+                c_today_endog = u_prime_inv.(Euler_RHS, γ)
 
                 # 3. Use budget constraint to get today's asset grid (endogenous)
                 k_today_endog = (c_today_endog .+ k_grid .- w * ē * ϵ) ./ (1 + r - δ)
@@ -396,8 +419,9 @@ function EstimateRegression(prim::Primitives, K_path::Vector{Float64}, Z_path::V
     return new_a0, new_a1, new_b0, new_b1, R_sq
 end
 
-function SolveModel(; z_grid=[1.01, 0.99], K_min=10.0, K_max=13.0, nK=30, seed=1234)
-    prim, sim, res, initial_μ = Initialize(; z_grid=z_grid, K_min=K_min, K_max=K_max, nK=nK, seed=seed)
+# Keyword arguments override the Primitives or Simulations defaults, e.g. SolveModel(; z_grid=[1.02, 0.98], γ=2.0)
+function SolveModel(; kwargs...)
+    prim, sim, res, initial_μ = Initialize(; kwargs...)
     @unpack_Simulations sim
 
     lom_error = 100.0

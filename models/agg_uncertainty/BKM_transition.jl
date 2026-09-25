@@ -10,12 +10,23 @@ include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
 
 @with_kw struct Simulation
     # TFP parameters
+    # TFP process log Z' = ρ log Z + σ ε, with the same defaults as the KS, Reiter, and SSJ solutions
     ρ::Float64 = 0.75       # TFP persistence
-    σ::Float64 = 0.00661      # TFP shock standard deviation
+    σ::Float64 = 0.00661    # TFP shock standard deviation
     Z_shock::Float64 = 0.01 # Size of initial TFP shock (for MIT shock)
     
     # Transition path parameters
-    T::Int64 = 350          # Time horizon for transition
+    T::Int64 = 300          # Time horizon for transition
+    tol_path::Float64 = 1e-12   # convergence tolerance for the capital path
+    max_iter_path::Int64 = 5000 # maximum iterations for the capital path
+    ν::Float64 = 0.95           # weight on the old guess when updating the capital path
+end
+
+# Route flat keyword arguments to the parameter structs whose fields they name; errors on unknown names
+function split_kwargs(kwargs, types...)
+    unknown = setdiff(keys(kwargs), fieldnames.(types)...)
+    isempty(unknown) || throw(ArgumentError("unknown parameter(s): $(join(unknown, ", "))"))
+    return map(T -> (; (k => v for (k, v) in pairs(kwargs) if k in fieldnames(T))...), types)
 end
 
 # Create a struct for transition path results
@@ -52,8 +63,7 @@ end
 end
 
 # Initialize transition paths
-function InitializeTransition(prim::Primitives, res_ss::Results; T=300, Z_shock=0.01)
-    sim = Simulation(T=T, Z_shock=Z_shock)
+function InitializeTransition(prim::Primitives, res_ss::Results, sim::Simulation)
     @unpack_Simulation sim
     @unpack_Primitives prim
     
@@ -119,8 +129,8 @@ function InitializeTransition(prim::Primitives, res_ss::Results; T=300, Z_shock=
         C_var_path=C_var_path, C_cv_path=C_cv_path,
         C_log_mean_path=C_log_mean_path, C_log_var_path=C_log_var_path
     )
-    
-    return sim, res_tr
+
+    return res_tr
 end
 
 # Modified Bellman equation for transition dynamics (backward iteration)
@@ -145,10 +155,10 @@ function BellmanTransition(prim::Primitives, res_tr::TransitionResults, sim::Sim
         p = M[ϵ_index, :]
         
         # Calculate expected marginal utility next period
-        EMU_prime = u_prime.(c_policy_next) * p
+        EMU_prime = u_prime.(c_policy_next, γ) * p
         
         # Get consumption today from Euler equation
-        c_today = u_prime_inv.(β * (1+r_next-δ) * EMU_prime)
+        c_today = u_prime_inv.(β * (1+r_next-δ) * EMU_prime, γ)
         
         # Get capital today from budget constraint
         k_today = (c_today + k_grid .- w*ē*ϵ) / (1+r-δ)
@@ -274,11 +284,11 @@ function UpdatePrices!(prim::Primitives, res_tr::TransitionResults, sim::Simulat
 end
 
 # Main function to solve for transition path
-function SolveTransitionPath(prim::Primitives, res_ss::Results; T=300, Z_shock=.01, tol_path=1e-12, max_iter_path=5000, ν=0.95)
+function SolveTransitionPath(prim::Primitives, res_ss::Results, sim::Simulation)
     @unpack_Primitives prim
-    
+
     # Initialize transition path
-    sim, res_tr = InitializeTransition(prim, res_ss; T, Z_shock)
+    res_tr = InitializeTransition(prim, res_ss, sim)
     @unpack_Simulation sim
     
     # Iteration counter and error
@@ -322,8 +332,8 @@ function SolveTransitionPath(prim::Primitives, res_ss::Results; T=300, Z_shock=.
     else
         println("Transition path converged after $iter iterations with error: $error")
     end
-    
-    return sim, res_tr
+
+    return res_tr
 end
 
 # Function to calculate aggregates from transition results
@@ -382,26 +392,26 @@ function CalculateAggregatesTransition!(prim::Primitives, res_tr::TransitionResu
 end
 
 
-# Main function to solve the model with BKM method
-function SolveModelTransition(; T=300, Z_shock=.01)
+# Main function to solve the model with BKM method.
+# Keyword arguments override the Primitives or Simulation defaults, e.g. SolveModelTransition(; γ=2.0, T=500)
+function SolveModelTransition(; kwargs...)
+    prim_kw, sim_kw = split_kwargs(kwargs, Primitives, Simulation)
+
     # First solve the steady state model
-    prim, res_ss = solve_model(; k_min=1e-6, k_max = 60.0, nk=60, n_hist=125)
+    prim, res_ss = solve_model(; prim_kw...)
 
-    # Solve for transition path
-    sim, res_tr = SolveTransitionPath(prim, res_ss; T, Z_shock)
+    # Solve for transition path and calculate additional aggregates
+    sim, res_tr = SolveTransition_from_SS(prim, res_ss; sim_kw...)
 
-    # calculate additional aggregates
-    CalculateAggregatesTransition!(prim, res_tr, sim)
-    
     return prim, res_ss, sim, res_tr
 end
 
-function SolveTransition_from_SS(prim::Primitives, res_ss::Results; T=300, Z_shock=.01)
-    # Initialize transition path
-    sim, res_tr = InitializeTransition(prim, res_ss; T, Z_shock)
+# Keyword arguments override the Simulation defaults, e.g. SolveTransition_from_SS(prim, res_ss; T=500, Z_shock=0.05)
+function SolveTransition_from_SS(prim::Primitives, res_ss::Results; kwargs...)
+    sim = Simulation(; kwargs...)
 
     # Solve for transition path
-    sim, res_tr = SolveTransitionPath(prim, res_ss; T, Z_shock)
+    res_tr = SolveTransitionPath(prim, res_ss, sim)
 
     # calculate additional aggregates
     CalculateAggregatesTransition!(prim, res_tr, sim)

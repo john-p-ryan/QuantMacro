@@ -14,6 +14,7 @@ end
 
 Constructs the linearized system for Reiter's method around the steady state of the Aiyagari model.
 Uses complementary slackness to properly handle binding borrowing constraints.
+The TFP parameters ρ and σ (defaults shared with the KS, BKM, and SSJ solutions) are stored in the returned system, so later steps (e.g. simulation) use the same process.
 
 The system is redefined to avoid redundancies:
 - State variables (x): [Z, μ (flattened, excluding the last element for each employment state)]
@@ -25,6 +26,7 @@ Returns a NamedTuple containing:
 - Steady state vectors (x_ss, y_ss)
 - Dimensions (n_x, n_y)
 - Function f and steady state vector v_ss
+- TFP parameters (ρ, σ)
 """
 function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
     # Extract relevant quantities from the steady state
@@ -269,13 +271,13 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
                     # Interpolate consumption given k_next
                     c_next = safe_pchip(k_grid, c_policy_t′[:, ϵ′_index], k_next)
                     
-                    # For log utility, MU = 1/c
-                    muc_next = u_prime(c_next)
+                    # CRRA marginal utility, MU = c^(-γ)
+                    muc_next = u_prime(c_next, γ)
                     expected_muc += M[ϵ_index, ϵ′_index] * muc_next
                 end
                 
                 # Standard Euler equation: MU_c(today) = β * (1+r′-δ) * E[MU_c(tomorrow)]
-                muc_today = u_prime(c_current)
+                muc_today = u_prime(c_current, γ)
                 euler_value = muc_today - β * (1+r_t′-δ) * expected_muc
                 
                 # Smooth transition between constraint and Euler equation
@@ -338,9 +340,11 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         y_ss = y_ss, 
         n_x = n_x, 
         n_y = n_y, 
-        f = f, 
+        f = f,
         v_ss = v_ss,
-        idxs = idxs
+        idxs = idxs,
+        ρ = ρ,
+        σ = σ
     )
 end
 
@@ -677,24 +681,24 @@ end
 
 
 """
-    simulate_reiter_economy(Z_path, system, g_x, h_x, res_ss, prim; ρ=0.75)
+    simulate_reiter_economy(Z_path, system, g_x, h_x, res_ss, prim)
 
 Simulate the economy using Reiter's linearized state-space system.
 
 Parameters:
 - Z_path: Vector of TFP levels over time
-- system: System structure from construct_reiter_system
+- system: System structure from construct_reiter_system; its ρ is used to back out TFP innovations,
+  so the innovations are consistent with the persistence built into h_x
 - g_x: Policy function matrix from solve_eig
 - h_x: State transition matrix from solve_eig
 - res_ss: Steady state results
 - prim: Primitives
-- ρ: TFP persistence parameter
 
 Returns:
 - NamedTuple with simulated paths for K, K_var, C, r, w
 """
-function simulate_reiter_economy(Z_path, system, g_x, h_x, res_ss, prim; ρ=0.75)
-    @unpack x_ss, y_ss, n_x, n_y = system
+function simulate_reiter_economy(Z_path, system, g_x, h_x, res_ss, prim)
+    @unpack x_ss, y_ss, n_x, n_y, ρ = system
     @unpack α, δ, L = prim
     
     T_sim = length(Z_path)

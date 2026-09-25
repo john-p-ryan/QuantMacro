@@ -3,6 +3,7 @@
 
 @with_kw struct Primitives
     β::Float64 = 0.99
+    γ::Float64 = 1.0  # coefficient of relative risk aversion (γ = 1 is log utility)
     α::Float64 = 0.36
     δ::Float64 = 0.025
     ē::Float64 = 0.3271
@@ -13,10 +14,13 @@
     unemp::Float64 = M[1, 2] / (M[1, 2] + M[2, 1])
     L = ē * (1 - unemp) # Fixed in Aiyagari because no aggregate uncertainty & exogenous labor supply
 
-    k_grid::Vector{Float64} = range(start=1e-6, stop=60.0, length=500)
-    k_min::Float64 = minimum(k_grid)
-    k_max::Float64 = maximum(k_grid)
-    nk::Int = length(k_grid)
+    k_min::Float64 = 1e-6
+    k_max::Float64 = 60.0
+    # Grid search restricts choices to this uniform grid, which is also the support of the distribution, so it
+    # needs a much finer grid than the other methods.
+    nk::Int = 500
+    k_grid::Vector{Float64} = range(start=k_min, stop=k_max, length=nk)
+    @assert k_grid[1] ≈ k_min && k_grid[end] ≈ k_max && length(k_grid) == nk "k_grid must span [k_min, k_max] with nk points"
 end
 
 
@@ -40,18 +44,20 @@ end
 end
 
 
-function u(c; ε=1e-7)
+# CRRA utility, normalized as (c^(1-γ) - 1) / (1-γ) so that it nests log utility at γ = 1.
+# expm1 keeps the normalization accurate for γ near 1. Below ε, u is extended linearly.
+function u(c, γ; ε=1e-7)
     if c < ε
-        return log(ε) + (c-ε)/ε
-    else 
+        return u(ε, γ; ε=ε) + (c - ε) / ε^γ  # slope u'(ε) = ε^(-γ)
+    elseif γ == 1
         return log(c)
+    else
+        return expm1((1 - γ) * log(c)) / (1 - γ)
     end
 end
 
 
-function initialize(;k_min=1e-6, k_max=60.0, nk=500)
-    prim = Primitives(k_min=k_min, k_max=k_max, nk=nk,
-                      k_grid=range(start=k_min, stop=k_max, length=nk))
+function initialize(prim::Primitives)
     @unpack_Primitives prim
 
     K = 11.6
@@ -63,7 +69,7 @@ function initialize(;k_min=1e-6, k_max=60.0, nk=500)
     for (z_index, z) in enumerate(z_grid)
         c_policy[:, z_index] = (1+r-δ) * k_grid .+ w * ē * z
     end
-    V = u.(c_policy)
+    V = u.(c_policy, γ)
 
     T_star = spzeros(nk * nz, nk * nz) # will be filled in later
 
@@ -72,7 +78,7 @@ function initialize(;k_min=1e-6, k_max=60.0, nk=500)
     C, Y, K_var, K_cv, C_var, C_cv = zeros(6)
 
     res = Results(V, k_policy, c_policy, T_star, K, w, r, μ, C, Y, K_var, K_cv, C_var, C_cv)
-    return prim, res
+    return res
 end
 
 
@@ -101,7 +107,7 @@ function bellman(prim::Primitives, res::Results)
                     # increasing k' further will only reduce consumption more
                     break
                 end
-                V_candidate = u(c) + β * EV[k_next_index, z_index]
+                V_candidate = u(c, γ) + β * EV[k_next_index, z_index]
 
                 if V_candidate > V_max
                     V_max = V_candidate
@@ -124,7 +130,8 @@ function VFI!(prim::Primitives, res::Results; tol=1e-8, max_iter=10_000)
     iter = 0
     while distance > tol && iter < max_iter
         V_next, k_next, c_next = bellman(prim, res)
-        distance = maximum(abs.(V_next - res.V))
+        # relative criterion: for γ > 1, V near c ≈ 0 is so large that an absolute tolerance is below machine precision
+        distance = maximum(abs.(V_next .- res.V) ./ (1 .+ abs.(res.V)))
         res.V = V_next
         res.k_policy = k_next
         res.c_policy = c_next
@@ -279,8 +286,11 @@ function calculate_aggregates!(prim, res)
 end
 
 
-function solve_model(; k_min=1e-6, k_max=50.0, nk=500)
-    prim, res = initialize(k_min=k_min, k_max=k_max, nk=nk)
+# Keyword arguments override the Primitives defaults, e.g. solve_model(; γ=2.0, nk=1000)
+solve_model(; kwargs...) = solve_model(Primitives(; kwargs...))
+
+function solve_model(prim::Primitives)
+    res = initialize(prim)
     steady_state_capital!(prim, res)
     calculate_aggregates!(prim, res)
     return prim, res

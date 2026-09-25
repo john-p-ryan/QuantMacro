@@ -96,6 +96,16 @@ function main()
     T_plot = 250      # Horizon to show in plots
     T_sim = 10000     # Horizon for long simulation
     shock_sizes = [0.01, 0.05, 0.10, 0.25] # Shock sizes to test
+    # Model parameters and individual capital grids shared by every method; anything not listed uses the
+    # Primitives defaults. The grids are set here explicitly (at the solvers' defaults) so the steady state
+    # behind BKM, Reiter, and SSJ is solved on the same grids as KS.
+    params = (; γ = 1.0,                                            # e.g. (; γ = 2.0, β = 0.98)
+                k_min = 1e-6, k_max = 60.0, nk = 60, k_density = 2.0,  # policy grid
+                n_hist = 125)                                       # histogram grid
+    # TFP process log Z' = ρ log Z + σ ε used by every method: KS's two-state chain (ρ only), BKM's MIT
+    # shock, Reiter's system, and SSJ
+    ρ = 0.75
+    σ = 0.00661
 
     use_level_deviations = true # flag for BKM to use level or pct change
 
@@ -107,8 +117,8 @@ function main()
 
     # --- 1a. Solve Steady State (common for all methods) ---
     println("\nSolving for the steady state...")
-    # Use Aiyagari module from BKM as it's at the top level
-    prim_ss, res_ss = solve_model(; k_min=1e-6, k_max=60.0, nk=60, n_hist=125)
+    # Use Aiyagari module from BKM as it's at the top level. BKM, Reiter, and SSJ read parameters from prim_ss.
+    prim_ss, res_ss = solve_model(; params...)
     println("Steady state solved. K_ss = $(res_ss.K)")
 
     # --- 1b. Solve and Time Each Method ---
@@ -116,7 +126,7 @@ function main()
 
     # Krusell-Smith
     println("\nSolving with Krusell-Smith...")
-    timed_ks = @timed KS.SolveModel(; z_grid=[1.0+shock, 1.0-shock]);
+    timed_ks = @timed KS.SolveModel(; params..., ρ, z_grid=[1.0+shock, 1.0-shock]);
     prim_ks, sim_ks, res_ks = timed_ks.value
     t_ks = timed_ks.time
     irf_ks_dev, _ = KS.estimate_impulse_response(prim_ks, res_ks, sim_ks, num_simulations=2_000_000, max_horizon=T_irf)
@@ -127,7 +137,7 @@ function main()
 
     # BKM
     println("\nSolving with BKM...")
-    timed_bkm = @timed SolveTransition_from_SS(prim_ss, res_ss; T=T_irf, Z_shock=shock);
+    timed_bkm = @timed SolveTransition_from_SS(prim_ss, res_ss; ρ, σ, T=T_irf, Z_shock=shock);
     sim_bkm, res_tr_bkm = timed_bkm.value
     t_bkm = timed_bkm.time
     irfs_bkm = ComputeIRFs(prim_ss, res_ss, res_tr_bkm, sim_bkm);
@@ -136,28 +146,24 @@ function main()
     # Reiter
     println("\nSolving with Reiter...")
     timed_reiter = @timed begin
-        system = construct_reiter_system(prim_ss, res_ss)
+        system = construct_reiter_system(prim_ss, res_ss; ρ, σ)
         AA = hcat(system.J_x′, system.J_y′)
         BB = -hcat(system.J_x, system.J_y)
         g_x, h_x = solve_eig(AA, BB, system.n_x)
-        calculate_reiter_irfs(prim_ss, res_ss, system, g_x, h_x; shock_size=shock, T=T_irf)
+        irfs = calculate_reiter_irfs(prim_ss, res_ss, system, g_x, h_x; shock_size=shock, T=T_irf)
+        (system, g_x, h_x, irfs)
     end
-    irfs_reiter = timed_reiter.value
+    # Keep the system and solution matrices for the later simulations; the system carries ρ and σ
+    system_reiter, g_x_reiter, h_x_reiter, irfs_reiter = timed_reiter.value
     t_reiter = timed_reiter.time
     timings["Reiter"] = t_reiter
-    
-    # Store system and matrices for later simulation
-    system_reiter = construct_reiter_system(prim_ss, res_ss)
-    AA_reiter = hcat(system_reiter.J_x′, system_reiter.J_y′)
-    BB_reiter = -hcat(system_reiter.J_x, system_reiter.J_y)
-    g_x_reiter, h_x_reiter = solve_eig(AA_reiter, BB_reiter, system_reiter.n_x)
 
     # SSJ
     println("\nSolving with SSJ...")
     timed_ssj = @timed begin
         J_K_r, J_K_w = fast_jacobian(prim_ss, res_ss, 1e-5, 1e-5, T_irf)
         J_r_K, J_w_K, J_r_Z, J_w_Z = Firm_Block(prim_ss, res_ss, T_irf)
-        solve_dK(0.75, shock, J_K_r, J_K_w, J_r_K, J_w_K, J_r_Z, J_w_Z)
+        solve_dK(ρ, shock, J_K_r, J_K_w, J_r_K, J_w_K, J_r_Z, J_w_Z)
     end
     _, dK_ssj = timed_ssj.value
     t_ssj = timed_ssj.time
@@ -220,7 +226,7 @@ function main()
     # 2. Simulate the Reiter economy using the same TFP path
     println("\nSimulating Reiter economy...")
     sim_path_reiter_full = simulate_reiter_economy(res_ks.Z_sim_path, system_reiter, 
-                                                     g_x_reiter, h_x_reiter, res_ss, prim_ss; ρ=0.75)
+                                                     g_x_reiter, h_x_reiter, res_ss, prim_ss)
 
     # 3. Extract post-burn-in moments from all simulations.
     burn_in_periods = sim_ks.burn
@@ -324,14 +330,13 @@ function main()
             K_max=11.62 + 25*shock_scaled
         )
     =#
-    ρ_tfp = 0.75  # TFP persistence from BKM code
 
 
     for shock_scaled in shock_sizes[2:end]
         println("\n>>> Processing for a $(shock_scaled*100)% TFP shock...")
 
         # Compute the unconditional std dev in log space
-        σ_z = shock_scaled #/ sqrt(1 - ρ_tfp^2)
+        σ_z = shock_scaled #/ sqrt(1 - ρ^2)
         
         # Create symmetric grid in LOG space (not level space!)
         z_grid_scaled = [exp(-σ_z), exp(σ_z)]
@@ -341,7 +346,9 @@ function main()
         
         # Re-solve KS with proper grid
         println("Re-solving with Krusell-Smith...")
-        prim_ks_scaled, sim_ks_scaled, res_ks_scaled = KS.SolveModel(
+        prim_ks_scaled, sim_ks_scaled, res_ks_scaled = KS.SolveModel(;
+            params...,
+            ρ,
             z_grid=z_grid_scaled,
             K_min=11.62 - 40*shock_scaled,
             K_max=11.62 + 70*shock_scaled,
@@ -366,8 +373,7 @@ function main()
             g_x_reiter, 
             h_x_reiter, 
             res_ss, 
-            prim_ss; 
-            ρ=0.75
+            prim_ss
         )
 
         # Extract moments

@@ -3,6 +3,7 @@
 
 @with_kw struct Primitives
     β::Float64 = 0.99
+    γ::Float64 = 1.0  # coefficient of relative risk aversion (γ = 1 is log utility)
     α::Float64 = 0.36
     δ::Float64 = 0.025
     ē::Float64 = 0.3271
@@ -13,13 +14,16 @@
     unemp::Float64 = M[1, 2] / (M[1, 2] + M[2, 1])
     L = ē * (1 - unemp) # Fixed in Aiyagari because no aggregate uncertainty & exogenous labor supply
 
-    k_grid::Vector{Float64} = make_grid(1e-6, 60.0, 100; density=2.0)
-    k_min::Float64 = minimum(k_grid)
-    k_max::Float64 = maximum(k_grid)
-    nk::Int64 = length(k_grid)
+    # set the grids through k_min, k_max, nk, k_density, and n_hist
+    k_min::Float64 = 1e-6     # borrowing constraint (≈ 0, kept positive so c and k stay interior)
+    k_max::Float64 = 60.0
+    nk::Int64 = 60
+    k_density::Float64 = 2.0  # curvature > 1 clusters points near k_min, where the policy functions bend
+    k_grid::Vector{Float64} = make_grid(k_min, k_max, nk; density=k_density)
+    @assert k_grid[1] ≈ k_min && k_grid[end] ≈ k_max && length(k_grid) == nk "k_grid must span [k_min, k_max] with nk points"
 
-    k_hist::Vector{Float64} = make_grid(k_min, k_max, 250; density=1.0)
-    n_hist::Int64 = length(k_hist)
+    n_hist::Int64 = 125
+    k_hist::Vector{Float64} = make_grid(k_min, k_max, n_hist; density=1.0)
 end
 
 
@@ -45,19 +49,20 @@ end
     C_cv::Float64                         # coefficient of variation of consumption
 end
 
-function u(c; ε=1e-7)
+# CRRA utility, normalized as (c^(1-γ) - 1) / (1-γ) so that it nests log utility at γ = 1.
+# expm1 keeps the normalization accurate for γ near 1. Below ε, u is extended linearly.
+function u(c, γ; ε=1e-7)
     if c < ε
-        return log(ε) + (c-ε)/ε
-    else 
+        return u(ε, γ; ε=ε) + (c - ε) / ε^γ  # slope u'(ε) = ε^(-γ)
+    elseif γ == 1
         return log(c)
+    else
+        return expm1((1 - γ) * log(c)) / (1 - γ)
     end
 end
 
 
-function initialize(;k_min=1e-6, k_max=60.0, nk=100, n_hist=125)
-    prim = Primitives(k_min=k_min, k_max=k_max, nk=nk, n_hist=n_hist,
-                      k_grid=make_grid(k_min, k_max, nk; density=2.0),
-                      k_hist=make_grid(k_min, k_max, n_hist; density=1.0))
+function initialize(prim::Primitives)
     @unpack_Primitives prim
 
     K = 11.6
@@ -85,7 +90,7 @@ function initialize(;k_min=1e-6, k_max=60.0, nk=100, n_hist=125)
     C, Y, K_var, K_cv, C_var, C_cv = zeros(6)
 
     res = Results(k_policy, c_policy, V, V_splines, k_splines, k_pol_hist, T_star, K, w, r, μ, C, Y, K_var, K_cv, C_var, C_cv)
-    return prim, res
+    return res
 end
 
 
@@ -112,7 +117,7 @@ function bellman(prim::Primitives, res::Results)
         p = M[z_index, :]
         for (k_index, k) in enumerate(k_grid)
             budget = (1+r-δ) * k + w * ē * z
-            obj(kp) = -(u(budget - kp) + β * EV_at_kprime(p, V_splines, kp))
+            obj(kp) = -(u(budget - kp, γ) + β * EV_at_kprime(p, V_splines, kp))
 
             # minimize obj with optimizer
             lower = if k_index == 1
@@ -123,7 +128,7 @@ function bellman(prim::Primitives, res::Results)
             upper = min(budget, k_max)
             result = optimize(obj, lower, upper; 
                             rel_tol=1e-10, abs_tol=1e-10)
-            if result.converged
+            if Optim.converged(result)
                 k_next[k_index, z_index] = result.minimizer
                 c_next[k_index, z_index] = budget - result.minimizer
                 V_next[k_index, z_index] = -result.minimum
@@ -150,7 +155,8 @@ function VFI!(prim, res; tol=1e-8, max_iter=10_000)
 
     while error > tol && iter < max_iter
         V_next, k_next, c_next, V_spl_next = bellman(prim, res)
-        error = maximum(abs.(V_next - res.V))
+        # relative criterion: for γ > 1, V near c ≈ 0 is so large that an absolute tolerance is below machine precision
+        error = maximum(abs.(V_next .- res.V) ./ (1 .+ abs.(res.V)))
         res.k_policy, res.c_policy, res.V, res.V_splines = k_next, c_next, V_next, V_spl_next
         iter += 1
     end
@@ -339,8 +345,11 @@ end
 
 
 
-function solve_model(; k_min=1e-6, k_max=50.0, nk=60, n_hist=125)
-    prim, res = initialize(k_min=k_min, k_max=k_max, nk=nk, n_hist=n_hist)
+# Keyword arguments override the Primitives defaults, e.g. solve_model(; γ=2.0, nk=100)
+solve_model(; kwargs...) = solve_model(Primitives(; kwargs...))
+
+function solve_model(prim::Primitives)
+    res = initialize(prim)
     steady_state_capital!(prim, res)
     calculate_aggregates!(prim, res)
     return prim, res

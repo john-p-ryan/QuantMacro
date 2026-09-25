@@ -18,7 +18,7 @@ function backward_iterate(prim_ss::Primitives, ∂V_next, r, w)
         p = M[ϵ_index,:]
         EMU_prime = ∂V_next * p
 
-        c_today = u_prime_inv.(β * EMU_prime)                                    
+        c_today = u_prime_inv.(β * EMU_prime, γ)
         k_today = (c_today + k_grid .- w * ē * ϵ) / (1+r-δ)                     
         c_spline = PchipSpline(k_today, c_today)                            
         c_pol[:, ϵ_index] = evaluate_spline(c_spline, k_grid)                
@@ -31,7 +31,7 @@ function backward_iterate(prim_ss::Primitives, ∂V_next, r, w)
         end
     end
 
-    ∂V = (1+r-δ) * u_prime.(c_pol)
+    ∂V = (1+r-δ) * u_prime.(c_pol, γ)
 
     return k_pol, c_pol, ∂V
 end
@@ -53,7 +53,7 @@ function compute_policy_sequences(prim_ss::Primitives, res_ss::Results, T::Int; 
     res_temp = deepcopy(res_ss)
 
     # --- Step 1: Find policy and co-state AT the shock time `s` ---
-    ∂V_ss = (1 + res_ss.r - δ) * u_prime.(res_ss.c_policy)
+    ∂V_ss = (1 + res_ss.r - δ) * u_prime.(res_ss.c_policy, γ)
     r_shock, w_shock = res_ss.r + dr, res_ss.w + dw
     
     k_pol_shock, _, ∂V_at_shock = backward_iterate(prim_ss, ∂V_ss, r_shock, w_shock)
@@ -187,7 +187,7 @@ function solve_dK(ρ, Z_shock, J_K_r, J_K_w, J_r_K, J_w_K, J_r_Z, J_w_Z)
     return dZ, dK
 end
 
-function SolveSSJ_IRFs(prim_ss::Primitives, res_ss::Results; T=300, dx=1e-5, ρ=0.75, Z_shock=0.01)
+function SolveSSJ_IRFs(prim_ss::Primitives, res_ss::Results; T=300, dx=1e-5, ρ=0.75, Z_shock=0.01)  # ρ default shared with the KS, BKM, and Reiter solutions
     # Step 1: Compute Household Jacobians (H_K)
     J_K_r, J_K_w = fast_jacobian(prim_ss, res_ss, dx, dx, T)
 
@@ -201,7 +201,7 @@ function SolveSSJ_IRFs(prim_ss::Primitives, res_ss::Results; T=300, dx=1e-5, ρ=
     scale = 1 / Z_shock # scale factor for percentage change
     dK_dZ = scale * dK / res_ss.K # percentage change
 
-    return dZ, dK, K_pct_change
+    return dZ, dK, dK_dZ
 end
 
 

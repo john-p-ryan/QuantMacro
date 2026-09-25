@@ -11,7 +11,7 @@ using Plots, LinearAlgebra,  Parameters, Statistics
 
 
 # Solve the Aiyagari model
-@time prim_Aiyagari, res_Aiyagari = AiyagariModule.solve_model(k_max=30.0) # match the k grid bound in KS.jl
+@time prim_Aiyagari, res_Aiyagari = AiyagariModule.solve_model() # k grid bounds match KS.jl
 
 # plot the capital policy function
 plot(prim_Aiyagari.k_grid, res_Aiyagari.k_policy, label=["Employed" "Unemployed"], xlabel="k", ylabel="k'", title="Capital Policy Function")
