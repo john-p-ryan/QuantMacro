@@ -20,6 +20,7 @@ include("helpers.jl")
     include("test_local.jl")
     include("test_minimize.jl")
     include("test_resume.jl")
+    include("test_staged.jl")
     include("test_parallel.jl")
 end
 

@@ -99,7 +99,8 @@ Global Optimizers*, Section 2.1 and Appendix A.6 in the supplied paper:
    worker finishes. Newly launched searches use the latest completed local
    results. If a mixed start is infeasible, fall back to its feasible seed.
 5. Return the best finite point evaluated anywhere, including screening and
-   interrupted local searches. Stop when all seeds have been processed, a
+   interrupted local searches (full-accuracy evaluations only in a staged run;
+   see below). Stop when all seeds have been processed, a
    budget is reached, or the optional `target_value` is attained.
 
 This is an independent implementation of the simplified algorithm, not a port
@@ -145,6 +146,41 @@ to `failure_exceptions` explicitly; avoid blanket suppression of programming
 errors. A disconnected feasible region can still be missed if screening does
 not find it. None of these local algorithms guarantees a solution on an
 arbitrary discontinuous objective.
+
+## Staged accuracy
+
+Screening only has to rank points, so it can often use a cheaper version of the
+model: coarser asset grids, fewer simulated agents, looser inner fixed-point
+tolerances. Pass that version as `screen_objective`:
+
+```python
+coarse = MomentObjective(lambda θ: model_moments(θ, grid="coarse", tol=1e-6), target, scales=target)
+fine = MomentObjective(lambda θ: model_moments(θ, grid="fine", tol=1e-10), target, scales=target)
+result = minimize(fine, bounds, screen_objective=coarse,
+                  config=TikTakConfig(n_samples=1024, n_local=20),
+                  run_dir="run-v1", problem_id="model-v1-coarse-v1-fine-v1")
+```
+
+Sobol and warm-start points are evaluated by `screen_objective`, and those
+values are used only to pick and order the seeds. Every local search, including
+its starting point, uses `objective`. The incumbent used for mixing,
+`target_value`, `result`, and `load_estimates` rank all use full-accuracy values,
+because a coarse criterion is biased, not merely noisy, and its values are not
+comparable to the fine ones. The two stages are cached separately, so the same
+point evaluated by both costs two model calls, and both share `max_evals`
+(`local_max_evals` applies only to local searches). The screening objective,
+and its moment targets/weights/scales, are part of the run specification. The
+`problem_id` should version both accuracy levels. With `workers > 1` both
+objectives must be picklable.
+
+The coarse and fine criteria should have the same shape: a screening objective
+whose ranking of regions differs from the fine one will pick the wrong seeds.
+Check this on a small pilot by comparing the two rankings on the same Sobol
+points. For more than two accuracy levels, or to change `x_tol` and
+`local_max_evals` between stages, chain runs with `warm_start` (see
+[Checkpoints, budgets, and reuse](#checkpoints-budgets-and-reuse)). Keep a
+single accuracy within each local search: simplex and trust-region methods
+compare values across iterations.
 
 ## Bounds and scaling
 

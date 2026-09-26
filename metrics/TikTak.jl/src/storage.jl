@@ -20,6 +20,7 @@ const LOCK_NAME = "coordinator.lock"
 mutable struct EvalRecord
     key::String
     sequence::Int               # attempt order; breaks value ties deterministically
+    screening::Bool             # evaluated by the screening objective of a staged run
     unit::Vector{Float64}
     parameters::Vector{Float64}
     status::Symbol              # :pending, :ok, :failed, :error, :abandoned
@@ -86,9 +87,12 @@ _float_vector(v) = Vector{Float64}(v)
 # Canonicalize signed zero so that -0.0 and 0.0 share a key; never round distinct points.
 _canonical(unit) = Vector{Float64}(unit) .+ 0.0
 
-function point_key(unit)
-    u = _canonical(unit)
-    return bytes2hex(sha256(collect(reinterpret(UInt8, u))))
+# Screening evaluations of a staged run come from a different (cheaper) objective,
+# so they are cached under their own key and never answer a full-accuracy lookup.
+function point_key(unit; screening::Bool=false)
+    bytes = collect(reinterpret(UInt8, _canonical(unit)))
+    screening && append!(bytes, codeunits("screen"))
+    return bytes2hex(sha256(bytes))
 end
 
 """
@@ -160,7 +164,8 @@ function _apply!(store::Store, r::Dict{String,Any})
     elseif t == "claim"
         key, task = r["key"], r["task"]
         store.n_attempts += 1
-        store.evaluations[key] = EvalRecord(key, store.n_attempts, _float_vector(r["unit"]),
+        store.evaluations[key] = EvalRecord(key, store.n_attempts, get(r, "screening", false),
+                                            _float_vector(r["unit"]),
                                             _float_vector(r["parameters"]), :pending, NaN, nothing, nothing,
                                             nothing, 0.0, Float64(r["started"]))
         store.attempts_by_task[task] = get(store.attempts_by_task, task, 0) + 1
@@ -176,7 +181,8 @@ function _apply!(store::Store, r::Dict{String,Any})
         rec.error = r["error"]
         rec.seconds = Float64(r["seconds"])
         rec.updated = Float64(r["updated"])
-        if rec.status === :ok
+        # Screening values of a staged run are not comparable with full-accuracy ones.
+        if rec.status === :ok && !rec.screening
             best = store.best_key === nothing ? nothing : store.evaluations[store.best_key]
             if best === nothing || (rec.value, rec.sequence, rec.key) < (best.value, best.sequence, best.key)
                 store.best_key = rec.key
@@ -252,17 +258,18 @@ function exhausted(store::Store)
 end
 
 """
-    claim!(store, unit, parameters, task, local_limit) -> (status, key, payload)
+    claim!(store, unit, parameters, task, local_limit; screening=false) -> (status, key, payload)
 
 Reserve a budget slot for a new model call, or report a cached outcome. `status`
 is one of `:claimed` (evaluate now), `:ok`/`:failed` (cached; `payload` is the
 value for `:ok`), `:error` (cached unexpected error; `payload` is its message),
 `:pending` (another worker is evaluating this exact point; retry later),
-`:budget`, or `:local_budget`.
+`:budget`, or `:local_budget`. `screening=true` marks an evaluation by the
+screening objective of a staged run, which has its own cache entry.
 """
-function claim!(store::Store, unit, parameters, task::AbstractString, local_limit)
+function claim!(store::Store, unit, parameters, task::AbstractString, local_limit; screening::Bool=false)
     unit = _canonical(unit)
-    key = point_key(unit)
+    key = point_key(unit; screening=screening)
     lock(store.lock) do
         rec = get(store.evaluations, key, nothing)
         if rec !== nothing && rec.status in (:ok, :failed, :error)
@@ -283,9 +290,11 @@ function claim!(store::Store, unit, parameters, task::AbstractString, local_limi
             return (:local_budget, key, nothing)
         end
         if rec === nothing || rec.status === :abandoned
-            _commit!(store, Dict{String,Any}("t" => "claim", "key" => key, "unit" => unit,
-                                             "parameters" => Vector{Float64}(parameters),
-                                             "task" => String(task), "started" => time()))
+            record = Dict{String,Any}("t" => "claim", "key" => key, "unit" => unit,
+                                      "parameters" => Vector{Float64}(parameters),
+                                      "task" => String(task), "started" => time())
+            screening && (record["screening"] = true)
+            _commit!(store, record)
             return (:claimed, key, nothing)
         end
         return (:pending, key, nothing)
@@ -313,8 +322,9 @@ end
 """
     best(store, task=nothing) -> Union{Nothing, EvalRecord}
 
-Best finite evaluation overall, or among the points touched by `task`. Ties are
-broken in favour of the point attempted first, then by key, so the choice is
+Best finite full-accuracy evaluation overall, or among the points touched by
+`task`; screening evaluations of a staged run are excluded. Ties are broken in
+favour of the point attempted first, then by key, so the choice is
 deterministic and stable under replay.
 """
 function best(store::Store, task=nothing)
@@ -327,7 +337,7 @@ function best(store::Store, task=nothing)
         winner = nothing
         for key in keys
             rec = store.evaluations[key]
-            rec.status === :ok || continue
+            (rec.status === :ok && !rec.screening) || continue
             if winner === nothing || (rec.value, rec.sequence, rec.key) < (winner.value, winner.sequence, winner.key)
                 winner = rec
             end
@@ -410,13 +420,14 @@ end
 Read the best evaluated physical parameter vectors of a saved run, for use as
 `warm_start` in a NEW search. Their objective values are deliberately not
 imported: a changed model, weighting matrix, or simulation design requires
-reevaluation.
+reevaluation. In a staged run, full-accuracy evaluations are ranked first and
+screening evaluations fill any remaining slots.
 """
 function load_estimates(directory::AbstractString; limit::Integer=20)
     limit > 0 || throw(ArgumentError("limit must be a positive integer"))
     isfile(joinpath(directory, JOURNAL_NAME)) || throw(ArgumentError("no run history found in $directory"))
     store = Store(directory; readonly=true)
     records = [r for r in values(store.evaluations) if r.status === :ok]
-    sort!(records; by=r -> (r.value, r.sequence, r.key))
+    sort!(records; by=r -> (r.screening, r.value, r.sequence, r.key))
     return [copy(r.parameters) for r in records[1:min(limit, end)]]
 end

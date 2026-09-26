@@ -12,13 +12,14 @@ from .storage import BudgetExhausted, LocalBudgetExhausted, Store
 
 
 class Evaluator:
-    def __init__(self, objective, transform, directory, task, config, local=False):
+    def __init__(self, objective, transform, directory, task, config, local=False, screening=False):
         self.objective = objective
         self.transform = transform
         self.store = Store(directory)
         self.task = task
         self.limit = config.local_max_evals if local else None
         self.failure_exceptions = config.failure_exceptions
+        self.screening = screening
 
     def __call__(self, unit):
         # Supported optimizers respect bounds; tolerate only floating-point drift.
@@ -27,7 +28,7 @@ class Evaluator:
             raise ValueError("local optimizer proposed a point outside the unit box")
         unit = np.clip(unit, 0, 1)
         parameters = self.transform.to_parameters(unit)
-        key, cached = self.store.claim(unit, parameters, self.task, self.limit)
+        key, cached = self.store.claim(unit, parameters, self.task, self.limit, self.screening)
         if cached is not None:
             return float(cached["value"]) if cached["status"] == "ok" else np.inf
         started = time.monotonic()
@@ -62,8 +63,8 @@ class Evaluator:
         return value
 
 
-def evaluate_point(objective, transform, directory, unit, task, config):
-    evaluator = Evaluator(objective, transform, directory, task, config)
+def evaluate_point(objective, transform, directory, unit, task, config, screening=False):
+    evaluator = Evaluator(objective, transform, directory, task, config, screening=screening)
     try:
         try:
             return evaluator(unit)

@@ -312,6 +312,11 @@ vector of `(lower, upper)` pairs; infinite bounds are allowed (see
 
 Keyword arguments:
 - `config::TikTakConfig`: algorithm settings.
+- `screen_objective`: optional cheaper objective with the same interface (for
+  example coarser grids or looser inner tolerances) used only to screen the
+  Sobol and warm-start points. Local searches, the incumbent, `target_value`
+  and the reported estimate use `objective` alone; screening values only rank
+  the seeds. Both stages share the `max_evals` budget.
 - `run_dir`: directory for the journal, result snapshot and lock. A temporary
   directory is used when omitted. With an explicit `run_dir`, a nonempty
   versioned `problem_id` is required; it must change whenever the model code,
@@ -330,10 +335,12 @@ Keyword arguments:
 and interrupted ones, across resumes; cached evaluations are free).
 `max_seconds` is a soft deadline: running model calls finish and are recorded.
 """
-function minimize(objective, bounds; config::TikTakConfig=TikTakConfig(), scale=nothing, location=nothing,
-                  tail=1e-6, run_dir=nothing, problem_id=nothing, resume::Bool=false, warm_start=nothing,
-                  workers=nothing, executor=nothing, callback=nothing)
+function minimize(objective, bounds; config::TikTakConfig=TikTakConfig(), screen_objective=nothing,
+                  scale=nothing, location=nothing, tail=1e-6, run_dir=nothing, problem_id=nothing,
+                  resume::Bool=false, warm_start=nothing, workers=nothing, executor=nothing, callback=nothing)
     transform = BoxTransform(bounds; scale=scale, location=location, tail=tail)
+    # With no free parameter there is no local stage, so the single point is evaluated at full accuracy.
+    staged = screen_objective !== nothing && transform.dimension > 0
     if run_dir === nothing
         resume && throw(ArgumentError("resume requires run_dir"))
         directory = mktempdir(; prefix="tiktak-", cleanup=false)
@@ -349,6 +356,9 @@ function minimize(objective, bounds; config::TikTakConfig=TikTakConfig(), scale=
         "schema" => 1, "problem_id" => String(problem_id), "transform" => specification(transform),
         "algorithm" => specification(config),
         "moments" => objective isa MomentObjective ? specification(objective) : nothing)
+    if staged
+        spec["screen_moments"] = screen_objective isa MomentObjective ? specification(screen_objective) : nothing
+    end
     # Validate serializability before starting expensive work.
     spec = JSON.parse(JSON.json(spec); dicttype=Dict{String,Any})
     deadline = config.max_seconds === nothing ? nothing : time() + config.max_seconds
@@ -373,7 +383,7 @@ function minimize(objective, bounds; config::TikTakConfig=TikTakConfig(), scale=
         end
         _register_store!(run_id, store)
         registered = true
-        setup!(executor, run_id, objective, transform, config, store)
+        setup!(executor, run_id, objective, staged ? screen_objective : nothing, transform, config, store)
         installed = true
         seeds = _point_list(get(store, "seeds"))
         screened = seeds !== nothing || _screen(run_id, points, config, executor, store)
@@ -382,12 +392,13 @@ function minimize(objective, bounds; config::TikTakConfig=TikTakConfig(), scale=
             _search(run_id, seeds, config, executor, store, callback, directory)
         end
         n_done = count(r -> r.status === :done, local_rows(store))
+        incomplete = !screened || (transform.dimension > 0 && n_done < length(seeds))
         status, message = :completed, "all retained seeds processed; global optimality is not certified"
-        if best(store) === nothing
+        if best(store) === nothing && !(staged && incomplete)
             status, message = :no_feasible_point, "no finite model evaluation found within the available budget"
         elseif _target_reached(store, config)
             status, message = :target_reached, "requested objective target attained"
-        elseif !screened || (transform.dimension > 0 && n_done < length(seeds))
+        elseif incomplete
             status, message = :budget_exhausted, "evaluation or wall-clock budget exhausted; increase budget and resume"
         end
         result = _result(store, directory, status, message)

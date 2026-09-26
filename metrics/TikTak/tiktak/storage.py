@@ -29,10 +29,16 @@ def encode(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def point_key(unit):
+def point_key(unit, screening=False):
     u = np.asarray(unit, dtype="<f8").copy()
     u[u == 0] = 0  # Canonicalize signed zero; never round distinct points.
-    return hashlib.sha256(u.tobytes()).hexdigest()
+    # Screening evaluations of a staged run come from a different (cheaper)
+    # objective, so they are cached under their own key.
+    return hashlib.sha256(u.tobytes() + (b"screen" if screening else b"")).hexdigest()
+
+
+def _has_screening_column(connection):
+    return any(row[1] == "screening" for row in connection.execute("PRAGMA table_info(evaluations)"))
 
 
 @contextmanager
@@ -80,7 +86,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS evaluations (
                 key TEXT PRIMARY KEY, unit TEXT NOT NULL, parameters TEXT NOT NULL,
                 status TEXT NOT NULL, value REAL, moments TEXT, residuals TEXT,
-                error TEXT, seconds REAL, updated REAL NOT NULL);
+                error TEXT, seconds REAL, updated REAL NOT NULL,
+                screening INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS attempts (
                 id INTEGER PRIMARY KEY, key TEXT NOT NULL, task TEXT NOT NULL,
                 started REAL NOT NULL);
@@ -91,6 +98,8 @@ class Store:
                 id INTEGER PRIMARY KEY, start TEXT NOT NULL, seed TEXT NOT NULL,
                 status TEXT NOT NULL, result TEXT);
         """)
+        if not _has_screening_column(self.connection):  # Runs created before staged screening.
+            self.connection.execute("ALTER TABLE evaluations ADD COLUMN screening INTEGER NOT NULL DEFAULT 0")
         existing = self.get("specification")
         if existing is not None:
             if not resume:
@@ -120,9 +129,13 @@ class Store:
         deadline = self.get("deadline")
         return self.count() >= self.get("max_evals") or (deadline is not None and time.time() >= deadline)
 
-    def claim(self, unit, parameters, task, local_limit=None):
-        """Return (key, cached row or None); reserve a hard budget slot atomically."""
-        key = point_key(unit)
+    def claim(self, unit, parameters, task, local_limit=None, screening=False):
+        """Return (key, cached row or None); reserve a hard budget slot atomically.
+
+        ``screening=True`` marks an evaluation by the screening objective of a
+        staged run, which has its own cache entry.
+        """
+        key = point_key(unit, screening)
         while True:
             with self.transaction():
                 row = self.connection.execute("SELECT * FROM evaluations WHERE key=?", (key,)).fetchone()
@@ -140,8 +153,9 @@ class Store:
                 if row is None or row["status"] == "abandoned":
                     now = time.time()
                     self.connection.execute(
-                        "INSERT OR REPLACE INTO evaluations(key,unit,parameters,status,updated) VALUES (?,?,?,?,?)",
-                        (key, encode(unit.tolist()), encode(parameters.tolist()), "pending", now))
+                        "INSERT OR REPLACE INTO evaluations(key,unit,parameters,status,updated,screening) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (key, encode(unit.tolist()), encode(parameters.tolist()), "pending", now, int(screening)))
                     self.connection.execute("INSERT INTO attempts(key,task,started) VALUES (?,?,?)", (key, task, now))
                     self.connection.execute("INSERT OR IGNORE INTO task_points VALUES (?,?)", (task, key))
                     return key, None
@@ -158,13 +172,15 @@ class Store:
              None if residuals is None else encode(residuals.tolist()), error, seconds, time.time(), key))
 
     def best(self, task=None):
+        """Best finite full-accuracy evaluation; screening values of a staged run are not comparable."""
         if task is None:
             row = self.connection.execute(
-                "SELECT * FROM evaluations WHERE status='ok' ORDER BY value,key LIMIT 1").fetchone()
+                "SELECT * FROM evaluations WHERE status='ok' AND screening=0 ORDER BY value,key LIMIT 1").fetchone()
         else:
             row = self.connection.execute(
                 "SELECT e.* FROM evaluations e JOIN task_points t ON e.key=t.key "
-                "WHERE t.task=? AND e.status='ok' ORDER BY e.value,e.key LIMIT 1", (task,)).fetchone()
+                "WHERE t.task=? AND e.status='ok' AND e.screening=0 ORDER BY e.value,e.key LIMIT 1",
+                (task,)).fetchone()
         return None if row is None else dict(row)
 
     def local_rows(self):
@@ -193,12 +209,15 @@ def load_estimates(directory, limit=20):
     """Read the best evaluated parameter vectors for a NEW search.
 
     Their objective values are deliberately not imported: a changed model,
-    weighting matrix, or simulation design requires reevaluation.
+    weighting matrix, or simulation design requires reevaluation. In a staged
+    run, full-accuracy evaluations are ranked first and screening evaluations
+    fill any remaining slots.
     """
     if not isinstance(limit, int) or limit <= 0:
         raise ValueError("limit must be a positive integer")
     path = Path(directory).resolve() / "history.sqlite3"
     with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as connection:
+        order = "screening,value,key" if _has_screening_column(connection) else "value,key"
         rows = connection.execute(
-            "SELECT parameters FROM evaluations WHERE status='ok' ORDER BY value,key LIMIT ?", (limit,)).fetchall()
+            f"SELECT parameters FROM evaluations WHERE status='ok' ORDER BY {order} LIMIT ?", (limit,)).fetchall()
     return np.asarray([json.loads(row[0]) for row in rows])

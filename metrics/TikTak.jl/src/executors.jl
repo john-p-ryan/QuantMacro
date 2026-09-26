@@ -2,7 +2,7 @@
 #
 # The coordinator submits screening evaluations and whole local searches as
 # jobs. Each job runs `TikTak` code on the executing process, which looks up the
-# run context (objective, transform, configuration, store handle) installed
+# run context (objectives, transform, configuration, store handle) installed
 # there before the search started. Completed jobs are reported on a channel so
 # the coordinator can react to whichever finishes first.
 
@@ -87,8 +87,9 @@ end
 
 # --- Run contexts -------------------------------------------------------------
 
-struct Context{O,S}
+struct Context{O,P,S}
     objective::O
+    screen_objective::P         # `nothing` unless the run is staged
     transform::BoxTransform
     config
     store::S
@@ -97,9 +98,9 @@ end
 const CONTEXTS = Dict{String,Context}()
 const CONTEXTS_LOCK = ReentrantLock()
 
-function _install_context!(run_id::AbstractString, objective, transform, config, store)
+function _install_context!(run_id::AbstractString, objective, screen_objective, transform, config, store)
     lock(CONTEXTS_LOCK) do
-        CONTEXTS[String(run_id)] = Context(objective, transform, config, store)
+        CONTEXTS[String(run_id)] = Context(objective, screen_objective, transform, config, store)
     end
     return nothing
 end
@@ -119,16 +120,18 @@ function _context(run_id::AbstractString)
     end
 end
 
-function setup!(::Union{InlineExecutor,ThreadedExecutor}, run_id, objective, transform, config, store)
-    _install_context!(run_id, objective, transform, config, store)
+function setup!(::Union{InlineExecutor,ThreadedExecutor}, run_id, objective, screen_objective, transform, config,
+                store)
+    _install_context!(run_id, objective, screen_objective, transform, config, store)
     return nothing
 end
 
-function setup!(ex::DistributedExecutor, run_id, objective, transform, config, store)
+function setup!(ex::DistributedExecutor, run_id, objective, screen_objective, transform, config, store)
     handle = RemoteStore(myid(), String(run_id))
     for pid in ex.pids
         try
-            remotecall_fetch(_install_context!, pid, run_id, objective, transform, config, handle)
+            remotecall_fetch(_install_context!, pid, run_id, objective, screen_objective, transform, config,
+                             handle)
         catch exc
             throw(ErrorException("could not install the run on worker $pid; make sure every worker " *
                                  "has run `using TikTak` and defines the objective (`@everywhere`). " *
@@ -158,7 +161,9 @@ end
 
 function _screen_job(run_id, index, unit)
     ctx = _context(run_id)
-    return evaluate_point(ctx.objective, ctx.transform, ctx.store, unit, "screen:$index", ctx.config)
+    staged = ctx.screen_objective !== nothing
+    return evaluate_point(staged ? ctx.screen_objective : ctx.objective, ctx.transform, ctx.store, unit,
+                          "screen:$index", ctx.config; screening=staged)
 end
 
 function _local_job(run_id, index)

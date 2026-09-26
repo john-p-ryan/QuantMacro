@@ -119,14 +119,14 @@ class _InlineExecutor:
         return future
 
 
-def _screen(objective, transform, directory, points, config, pool, store):
+def _screen(objective, transform, directory, points, config, pool, store, screening):
     values = [None] * len(points)
     pending, next_index, stopped = {}, 0, False
     while pending or (next_index < len(points) and not stopped):
         while not stopped and next_index < len(points) and len(pending) < config.workers:
             i = next_index
             future = pool.submit(evaluate_point, objective, transform, directory,
-                                 np.asarray(points[i]), f"screen:{i}", config)
+                                 np.asarray(points[i]), f"screen:{i}", config, screening)
             pending[future] = i
             next_index += 1
         completed, _ = wait(pending, return_when=FIRST_COMPLETED)
@@ -201,7 +201,7 @@ def _result(store, directory, status, message):
 
 
 def minimize(objective: Callable, bounds, *, config: TikTakConfig | None = None,
-             scale=None, location=None, tail=1e-6, run_dir=None, problem_id=None,
+             screen_objective: Callable | None = None, scale=None, location=None, tail=1e-6, run_dir=None, problem_id=None,
              resume=False, warm_start=None, executor=None, callback=None) -> TikTakResult:
     """Minimize a scalar objective or ``MomentObjective`` using TikTak.
 
@@ -211,6 +211,12 @@ def minimize(objective: Callable, bounds, *, config: TikTakConfig | None = None,
     ``max_evals`` is a cumulative hard model-call cap, including failed and
     interrupted attempts; cached evaluations do not consume it. ``max_seconds``
     is a soft per-invocation deadline checked before launching evaluations.
+
+    ``screen_objective`` is an optional cheaper objective with the same
+    interface (for example coarser grids or looser inner tolerances) used only
+    to screen the Sobol and warm-start points. Local searches, the incumbent,
+    ``target_value`` and the reported estimate use ``objective`` alone;
+    screening values only rank the seeds. Both stages share ``max_evals``.
 
     The optional executor must implement the concurrent.futures interface and
     run on this same host. It remains owned by the caller. A callback receives
@@ -222,6 +228,10 @@ def minimize(objective: Callable, bounds, *, config: TikTakConfig | None = None,
     transform = BoxTransform(bounds, scale=scale, location=location, tail=tail)
     if not callable(objective):
         raise TypeError("objective must be callable")
+    if screen_objective is not None and not callable(screen_objective):
+        raise TypeError("screen_objective must be callable")
+    # With no free parameter there is no local stage, so the point is evaluated at full accuracy.
+    staged = screen_objective is not None and transform.dimension > 0
     if run_dir is None:
         if resume:
             raise ValueError("resume requires run_dir")
@@ -236,6 +246,9 @@ def minimize(objective: Callable, bounds, *, config: TikTakConfig | None = None,
     specification = dict(schema=1, problem_id=problem_id, transform=transform.specification(),
                          algorithm=config.specification(),
                          moments=objective.specification() if isinstance(objective, MomentObjective) else None)
+    if staged:
+        specification["screen_moments"] = (screen_objective.specification()
+                                           if isinstance(screen_objective, MomentObjective) else None)
     # Validate serializability before starting expensive work.
     specification = json.loads(json.dumps(specification, allow_nan=False))
     deadline = None if config.max_seconds is None else time.time() + config.max_seconds
@@ -268,16 +281,18 @@ def minimize(objective: Callable, bounds, *, config: TikTakConfig | None = None,
                     pool = ProcessPoolExecutor(config.workers, mp_context=multiprocessing.get_context("spawn"))
                     owned = True
             seeds = store.get("seeds")
-            screened = seeds is not None or _screen(objective, transform, str(directory), points, config, pool, store)
+            screened = seeds is not None or _screen(screen_objective if staged else objective, transform,
+                                                    str(directory), points, config, pool, store, staged)
             seeds = store.get("seeds")
             if screened and seeds and transform.dimension:
                 _search(objective, transform, str(directory), seeds, config, pool, store, callback)
             result = _result(store, directory, "completed", "all retained seeds processed; global optimality is not certified")
-            if not result.has_solution:
+            incomplete = not screened or (transform.dimension and result.n_local_completed < len(seeds))
+            if not result.has_solution and not (staged and incomplete):
                 result.status, result.message = "no_feasible_point", "no finite model evaluation found within the available budget"
             elif _target_reached(store, config):
                 result.status, result.message = "target_reached", "requested objective target attained"
-            elif not screened or (transform.dimension and result.n_local_completed < len(seeds)):
+            elif incomplete:
                 result.status, result.message = "budget_exhausted", "evaluation or wall-clock budget exhausted; increase budget and resume"
             store.export(result.to_dict())
             return result

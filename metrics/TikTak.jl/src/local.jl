@@ -246,12 +246,13 @@ end
 # --- Evaluator --------------------------------------------------------------
 
 """
-    Evaluator(objective, transform, store, task, config; islocal=false)
+    Evaluator(objective, transform, store, task, config; islocal=false, screening=false)
 
 Callable mapping a unit-box point to an objective value while recording every
 model call in the store: it claims a budget slot (or returns a cached outcome),
 runs the model, classifies failures, and stores moments, residuals, errors and
-runtime. Failed evaluations return `Inf`.
+runtime. Failed evaluations return `Inf`. `screening=true` records the calls as
+screening-stage evaluations of a staged run.
 """
 struct Evaluator{O,S}
     objective::O
@@ -260,16 +261,18 @@ struct Evaluator{O,S}
     task::String
     limit::Union{Nothing,Int}
     failure_exceptions::Tuple
+    screening::Bool
 end
 
-function Evaluator(objective, transform::BoxTransform, store, task::AbstractString, config; islocal::Bool=false)
+function Evaluator(objective, transform::BoxTransform, store, task::AbstractString, config;
+                   islocal::Bool=false, screening::Bool=false)
     return Evaluator(objective, transform, store, String(task), islocal ? config.local_max_evals : nothing,
-                     config.failure_exceptions)
+                     config.failure_exceptions, screening)
 end
 
-function _claim_point(store, unit, parameters, task, limit)
+function _claim_point(store, unit, parameters, task, limit, screening)
     while true
-        status, key, payload = claim!(store, unit, parameters, task, limit)
+        status, key, payload = claim!(store, unit, parameters, task, limit; screening=screening)
         status === :claimed && return key, nothing
         status === :ok && return key, Float64(payload)
         status === :failed && return key, Inf
@@ -292,7 +295,7 @@ function (ev::Evaluator)(unit_in::AbstractVector)
         throw(ArgumentError("local optimizer proposed a point outside the unit box"))
     unit = _canonical(clamp.(unit, 0.0, 1.0))
     parameters = to_parameters(ev.transform, unit)
-    key, cached = _claim_point(ev.store, unit, parameters, ev.task, ev.limit)
+    key, cached = _claim_point(ev.store, unit, parameters, ev.task, ev.limit, ev.screening)
     cached === nothing || return cached
     started = time_ns()
     local evaluation
@@ -330,13 +333,13 @@ function (ev::Evaluator)(unit_in::AbstractVector)
 end
 
 """
-    evaluate_point(objective, transform, store, unit, task, config)
+    evaluate_point(objective, transform, store, unit, task, config; screening=false)
 
 Screen one point. Returns its value (`Inf` when failed) or `nothing` when the
 global budget is exhausted.
 """
-function evaluate_point(objective, transform, store, unit, task, config)
-    evaluator = Evaluator(objective, transform, store, task, config)
+function evaluate_point(objective, transform, store, unit, task, config; screening::Bool=false)
+    evaluator = Evaluator(objective, transform, store, task, config; screening=screening)
     try
         return evaluator(unit)
     catch exc

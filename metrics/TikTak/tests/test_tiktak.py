@@ -314,3 +314,66 @@ def test_boundary_optimum_and_warm_seed(tmp_path, method):
                       run_dir=tmp_path, problem_id="boundary")
     np.testing.assert_array_equal(result.x, [0, 1])
     assert result.fun == 2
+
+
+def coarse_quadratic(x):
+    # Coarse stand-in: the minimum is shifted and values are lower, as a coarse
+    # grid biases rather than merely perturbs the criterion.
+    return float(np.sum((x - np.array([0.25, -0.35])) ** 2)) - 1.0
+
+
+def test_staged_screening_uses_cheap_objective(tmp_path):
+    coarse_calls, fine_calls = [], []
+    config = TikTakConfig(n_samples=16, n_local=3, local_max_evals=150)
+    result = minimize(lambda x: fine_calls.append(x.copy()) or quadratic(x), [(-2, 2)] * 2, config=config,
+                      screen_objective=lambda x: coarse_calls.append(x.copy()) or coarse_quadratic(x),
+                      run_dir=tmp_path, problem_id="staged-v1")
+    assert result.status == "completed" and result.fun < 1e-8
+    assert len(coarse_calls) == 16 and result.n_evals == len(coarse_calls) + len(fine_calls)
+    rows = db_rows(tmp_path, "SELECT a.task, e.screening FROM attempts a JOIN evaluations e ON a.key=e.key")
+    assert all(bool(screening) == task.startswith("screen:") for task, screening in rows)
+    # The coarse values are lower, but never become the estimate.
+    assert all(r["fun"] >= 0 for r in result.local_results)
+    # The first local starts at the best seed: its screening value is not reused.
+    seeds = json.loads(db_rows(tmp_path, "SELECT value FROM meta WHERE key='seeds'")[0][0])
+    seed_x = BoxTransform([(-2, 2)] * 2).to_parameters(np.asarray(seeds[0]))
+    assert any(np.allclose(call, seed_x) for call in fine_calls)
+    np.testing.assert_array_equal(load_estimates(tmp_path, limit=1)[0], result.x)
+
+
+def test_staged_resume_and_budget_status(tmp_path):
+    config = TikTakConfig(n_samples=16, n_local=3, max_evals=20)
+    first = minimize(quadratic, [(-2, 2)] * 2, config=config, screen_objective=coarse_quadratic,
+                     run_dir=tmp_path, problem_id="staged-resume")
+    assert first.status == "budget_exhausted"
+    more = replace(config, max_evals=600)
+    with pytest.raises(ValueError, match="specification differs"):
+        minimize(quadratic, [(-2, 2)] * 2, config=more, run_dir=tmp_path, problem_id="staged-resume", resume=True)
+    second = minimize(quadratic, [(-2, 2)] * 2, config=more, screen_objective=coarse_quadratic,
+                      run_dir=tmp_path, problem_id="staged-resume", resume=True)
+    assert second.status == "completed" and second.fun < 1e-8
+    assert db_rows(tmp_path, "SELECT MAX(n) FROM (SELECT COUNT(*) n FROM attempts GROUP BY key)")[0][0] == 1
+    # Budget spent entirely in screening is not reported as infeasibility.
+    screening_only = minimize(quadratic, [(-2, 2)] * 2, config=TikTakConfig(n_samples=16, max_evals=16),
+                              screen_objective=coarse_quadratic)
+    assert screening_only.status == "budget_exhausted" and not screening_only.has_solution
+
+
+def test_staged_parallel_and_fixed_point(tmp_path):
+    result = minimize(quadratic, [(-2, 2)] * 2, screen_objective=coarse_quadratic,
+                      config=TikTakConfig(n_samples=16, n_local=4, workers=2, max_evals=700),
+                      run_dir=tmp_path, problem_id="staged-parallel")
+    assert result.status == "completed" and result.fun < 1e-8
+    fixed = minimize(lambda x: 3.0, [(1, 1)], screen_objective=lambda x: 1 / 0)
+    assert fixed.fun == 3.0
+
+
+def test_resume_migrates_pre_staging_database(tmp_path):
+    config = TikTakConfig(n_samples=8, n_local=2, max_evals=10)
+    minimize(quadratic, [(-2, 2)] * 2, config=config, run_dir=tmp_path, problem_id="legacy")
+    with sqlite3.connect(tmp_path / "history.sqlite3") as connection:
+        connection.execute("ALTER TABLE evaluations DROP COLUMN screening")
+    assert len(load_estimates(tmp_path, limit=3)) == 3
+    result = minimize(quadratic, [(-2, 2)] * 2, config=replace(config, max_evals=500), run_dir=tmp_path,
+                      problem_id="legacy", resume=True)
+    assert result.status == "completed" and result.fun < 1e-8
