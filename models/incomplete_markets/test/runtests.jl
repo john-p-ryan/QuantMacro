@@ -21,6 +21,10 @@ module InterpVFI
     include(joinpath(@__DIR__, "..", "Aiyagari_VFI_interp.jl"))
 end
 
+module HACT
+    include(joinpath(@__DIR__, "..", "Aiyagari_HACT.jl"))
+end
+
 include("helpers.jl")
 
 @testset verbose = true "Aiyagari" begin
@@ -29,4 +33,5 @@ include("helpers.jl")
     include("test_household.jl")
     include("test_distribution.jl")
     include("test_equilibrium.jl")
+    include("test_continuous_time.jl")
 end
