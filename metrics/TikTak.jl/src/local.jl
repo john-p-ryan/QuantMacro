@@ -101,20 +101,20 @@ end
 Opportunistic coordinate polling with mesh contraction on the unit box.
 """
 function pattern_search(f, start::AbstractVector; step, tolerance, improvement_tol, max_calls)
-    x = Vector{Float64}(start)
-    best = f(x)
+    point = Vector{Float64}(start)
+    best_value = f(point)
     calls = 1
     while step > tolerance && calls < max_calls
         improved = false
-        for j in eachindex(x)
+        for coordinate_index in eachindex(point)
             for direction in (1, -1)
-                trial = copy(x)
-                trial[j] = clamp(x[j] + direction * step, 0.0, 1.0)
-                trial == x && continue
+                trial = copy(point)
+                trial[coordinate_index] = clamp(point[coordinate_index] + direction * step, 0.0, 1.0)
+                trial == point && continue
                 value = f(trial)
                 calls += 1
-                if value < best - improvement_tol
-                    x, best, improved = trial, value, true
+                if value < best_value - improvement_tol
+                    point, best_value, improved = trial, value, true
                     break
                 end
                 calls >= max_calls && break
@@ -135,61 +135,71 @@ Bounded adaptive Nelder–Mead on the unit box. Stops when every vertex is withi
 after about `max_calls` objective calls.
 """
 function nelder_mead(f, start::AbstractVector; initial_step, x_tol, f_tol, max_calls)
-    n = length(start)
-    n >= 1 || throw(ArgumentError("nelder_mead requires at least one free parameter"))
-    x0 = Vector{Float64}(start)
+    dimension = length(start)
+    dimension >= 1 || throw(ArgumentError("nelder_mead requires at least one free parameter"))
+    initial_point = Vector{Float64}(start)
     edge = min(initial_step, 0.5)
     # Build a full-rank inward simplex; a relative simplex is tiny near zero and
     # can collapse at a bound.
-    simplex = [copy(x0)]
-    for j in 1:n
-        vertex = copy(x0)
-        vertex[j] = clamp(vertex[j] + (vertex[j] <= 0.5 ? edge : -edge), 0.0, 1.0)
+    simplex = [copy(initial_point)]
+    for coordinate_index in 1:dimension
+        vertex = copy(initial_point)
+        vertex[coordinate_index] = clamp(
+            vertex[coordinate_index] + (vertex[coordinate_index] <= 0.5 ? edge : -edge),
+            0.0, 1.0,
+        )
         push!(simplex, vertex)
     end
     calls = 0
-    evaluate = x -> (calls += 1; f(x))
+    evaluate = function (point)
+        calls += 1
+        return f(point)
+    end
     values = [evaluate(v) for v in simplex]
-    if n >= 2
-        α, β, γ, δ = 1.0, 1 + 2 / n, 0.75 - 1 / (2n), 1 - 1 / n
+    # Adaptive coefficients for reflection, expansion, contraction, and shrinkage.
+    if dimension >= 2
+        reflection, expansion, contraction, shrinkage = (
+            1.0, 1 + 2 / dimension, 0.75 - 1 / (2 * dimension), 1 - 1 / dimension,
+        )
     else
-        α, β, γ, δ = 1.0, 2.0, 0.5, 0.5
+        reflection, expansion, contraction, shrinkage = 1.0, 2.0, 0.5, 0.5
     end
     while true
         order = sortperm(values)
         simplex, values = simplex[order], values[order]
-        xdiff = maximum(maximum(abs, simplex[i] .- simplex[1]) for i in 2:n+1)
-        fdiff = maximum(abs(values[i] - values[1]) for i in 2:n+1)
-        (xdiff <= x_tol && fdiff <= f_tol) && return true, "simplex tolerance reached"
+        point_spread = maximum(maximum(abs, simplex[i] .- simplex[1]) for i in 2:dimension+1)
+        value_spread = maximum(abs(values[i] - values[1]) for i in 2:dimension+1)
+        (point_spread <= x_tol && value_spread <= f_tol) && return true, "simplex tolerance reached"
         calls >= max_calls && return false, "local call limit reached"
-        centroid = sum(simplex[1:n]) ./ n
+        centroid = sum(simplex[1:dimension]) ./ dimension
         worst = simplex[end]
-        xr = clamp.(centroid .+ α .* (centroid .- worst), 0.0, 1.0)
-        fr = evaluate(xr)
-        if fr < values[1]
-            xe = clamp.(centroid .+ β .* (xr .- centroid), 0.0, 1.0)
-            fe = evaluate(xe)
-            simplex[end], values[end] = fe < fr ? (xe, fe) : (xr, fr)
-        elseif fr < values[n]
-            simplex[end], values[end] = xr, fr
+        reflected = clamp.(centroid .+ reflection .* (centroid .- worst), 0.0, 1.0)
+        reflected_value = evaluate(reflected)
+        if reflected_value < values[1]
+            expanded = clamp.(centroid .+ expansion .* (reflected .- centroid), 0.0, 1.0)
+            expanded_value = evaluate(expanded)
+            simplex[end], values[end] = expanded_value < reflected_value ?
+                (expanded, expanded_value) : (reflected, reflected_value)
+        elseif reflected_value < values[dimension]
+            simplex[end], values[end] = reflected, reflected_value
         else
             shrink = true
-            if fr < values[end]
-                xc = clamp.(centroid .+ γ .* (xr .- centroid), 0.0, 1.0)
-                fc = evaluate(xc)
-                if fc <= fr
-                    simplex[end], values[end], shrink = xc, fc, false
+            if reflected_value < values[end]
+                outside_contracted = clamp.(centroid .+ contraction .* (reflected .- centroid), 0.0, 1.0)
+                outside_value = evaluate(outside_contracted)
+                if outside_value <= reflected_value
+                    simplex[end], values[end], shrink = outside_contracted, outside_value, false
                 end
             else
-                xcc = clamp.(centroid .- γ .* (centroid .- worst), 0.0, 1.0)
-                fcc = evaluate(xcc)
-                if fcc < values[end]
-                    simplex[end], values[end], shrink = xcc, fcc, false
+                inside_contracted = clamp.(centroid .- contraction .* (centroid .- worst), 0.0, 1.0)
+                inside_value = evaluate(inside_contracted)
+                if inside_value < values[end]
+                    simplex[end], values[end], shrink = inside_contracted, inside_value, false
                 end
             end
             if shrink
-                for i in 2:n+1
-                    simplex[i] = clamp.(simplex[1] .+ δ .* (simplex[i] .- simplex[1]), 0.0, 1.0)
+                for i in 2:dimension+1
+                    simplex[i] = clamp.(simplex[1] .+ shrinkage .* (simplex[i] .- simplex[1]), 0.0, 1.0)
                     values[i] = evaluate(simplex[i])
                 end
             end

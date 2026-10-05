@@ -43,19 +43,19 @@ end
 
 function BoxTransform(bounds; scale=nothing, location=nothing, tail=1e-6)
     lower, upper = _parse_bounds(bounds)
-    n = length(lower)
-    n == 0 && throw(ArgumentError("bounds must contain at least one parameter"))
+    n_parameters = length(lower)
+    n_parameters == 0 && throw(ArgumentError("bounds must contain at least one parameter"))
     if any(isnan, lower) || any(isnan, upper) || any(lower .> upper) ||
        any(==(Inf), lower) || any(==(-Inf), upper)
         throw(ArgumentError("invalid parameter bounds"))
     end
     (isfinite(tail) && 0 < tail < 0.5) || throw(ArgumentError("tail must lie strictly between 0 and 0.5"))
-    s = _broadcast_vector(scale, 1.0, n, "scale")
-    (all(isfinite, s) && all(>(0), s)) || throw(ArgumentError("scale must be finite and positive"))
-    l = _broadcast_vector(location, 0.0, n, "location")
-    all(isfinite, l) || throw(ArgumentError("location must be finite"))
+    scales = _broadcast_vector(scale, 1.0, n_parameters, "scale")
+    (all(isfinite, scales) && all(>(0), scales)) || throw(ArgumentError("scale must be finite and positive"))
+    locations = _broadcast_vector(location, 0.0, n_parameters, "location")
+    all(isfinite, locations) || throw(ArgumentError("location must be finite"))
     free = findall(lower .!= upper)
-    transform = BoxTransform(lower, upper, s, l, Float64(tail), free, length(free), n)
+    transform = BoxTransform(lower, upper, scales, locations, Float64(tail), free, length(free), n_parameters)
     # Fail before launching a model if user-specified scales overflow.
     if !(all(isfinite, to_parameters(transform, zeros(transform.dimension))) &&
          all(isfinite, to_parameters(transform, ones(transform.dimension))))
@@ -69,28 +69,33 @@ end
 
 Physical parameter vector (including fixed parameters) for a point of the unit box.
 """
-function to_parameters(t::BoxTransform, unit::AbstractVector{<:Real})
-    length(unit) == t.dimension || throw(ArgumentError("unit point has invalid length"))
+function to_parameters(transform::BoxTransform, unit::AbstractVector{<:Real})
+    length(unit) == transform.dimension || throw(ArgumentError("unit point has invalid length"))
     all(isfinite, unit) || throw(ArgumentError("unit point has nonfinite coordinates"))
     (any(<(0), unit) || any(>(1), unit)) && throw(ArgumentError("unit point lies outside [0, 1]"))
-    x = copy(t.lower)
-    for (k, j) in enumerate(t.free)
-        v = Float64(unit[k])
-        lo, hi, s = t.lower[j], t.upper[j], t.scale[j]
-        if isfinite(lo) && isfinite(hi)
-            x[j] = (1 - v) * lo + v * hi
-        elseif isfinite(lo)
-            z = (1 - t.tail) * v
-            x[j] = lo + s * z / (1 - z)
-        elseif isfinite(hi)
-            z = (1 - t.tail) * (1 - v)
-            x[j] = hi - s * z / (1 - z)
+    parameters = copy(transform.lower)
+    for (unit_index, parameter_index) in enumerate(transform.free)
+        coordinate = Float64(unit[unit_index])
+        lower, upper, scale = (
+            transform.lower[parameter_index],
+            transform.upper[parameter_index],
+            transform.scale[parameter_index],
+        )
+        if isfinite(lower) && isfinite(upper)
+            parameters[parameter_index] = (1 - coordinate) * lower + coordinate * upper
+        elseif isfinite(lower)
+            mapped_coordinate = (1 - transform.tail) * coordinate
+            parameters[parameter_index] = lower + scale * mapped_coordinate / (1 - mapped_coordinate)
+        elseif isfinite(upper)
+            mapped_coordinate = (1 - transform.tail) * (1 - coordinate)
+            parameters[parameter_index] = upper - scale * mapped_coordinate / (1 - mapped_coordinate)
         else
-            z = t.tail + (1 - 2 * t.tail) * v
-            x[j] = t.location[j] + s * tan(pi * (z - 0.5))
+            mapped_coordinate = transform.tail + (1 - 2 * transform.tail) * coordinate
+            parameters[parameter_index] = transform.location[parameter_index] +
+                scale * tan(pi * (mapped_coordinate - 0.5))
         end
     end
-    return x
+    return parameters
 end
 
 """
@@ -100,38 +105,49 @@ Unit-box coordinates of the free entries of a physical parameter vector. Throws
 if the parameters violate the bounds or lie beyond the finite tail cutoff of an
 infinite bound.
 """
-function to_unit(t::BoxTransform, parameters::AbstractVector{<:Real})
-    length(parameters) == t.size || throw(ArgumentError("parameters must be a vector matching bounds"))
-    x = Vector{Float64}(parameters)
-    all(isfinite, x) || throw(ArgumentError("parameters must be a finite vector matching bounds"))
-    (any(x .< t.lower) || any(x .> t.upper)) && throw(ArgumentError("parameters violate bounds"))
-    u = Vector{Float64}(undef, t.dimension)
-    for (k, j) in enumerate(t.free)
-        lo, hi, s = t.lower[j], t.upper[j], t.scale[j]
-        if isfinite(lo) && isfinite(hi)
-            width = hi - lo
+function to_unit(transform::BoxTransform, parameters::AbstractVector{<:Real})
+    length(parameters) == transform.size || throw(ArgumentError("parameters must be a vector matching bounds"))
+    physical = Vector{Float64}(parameters)
+    all(isfinite, physical) || throw(ArgumentError("parameters must be a finite vector matching bounds"))
+    (any(physical .< transform.lower) || any(physical .> transform.upper)) &&
+        throw(ArgumentError("parameters violate bounds"))
+    unit = Vector{Float64}(undef, transform.dimension)
+    for (unit_index, parameter_index) in enumerate(transform.free)
+        lower, upper, scale = (
+            transform.lower[parameter_index],
+            transform.upper[parameter_index],
+            transform.scale[parameter_index],
+        )
+        if isfinite(lower) && isfinite(upper)
+            width = upper - lower
             # Avoid overflow for very wide intervals, but preserve tiny ones.
-            u[k] = isfinite(width) ? (x[j] - lo) / width : (x[j] / 2 - lo / 2) / (hi / 2 - lo / 2)
-        elseif isfinite(lo)
-            d = (x[j] - lo) / s
-            u[k] = (1 - 1 / (1 + d)) / (1 - t.tail)
-        elseif isfinite(hi)
-            d = (hi - x[j]) / s
-            u[k] = 1 - (1 - 1 / (1 + d)) / (1 - t.tail)
+            unit[unit_index] = isfinite(width) ?
+                (physical[parameter_index] - lower) / width :
+                (physical[parameter_index] / 2 - lower / 2) / (upper / 2 - lower / 2)
+        elseif isfinite(lower)
+            distance = (physical[parameter_index] - lower) / scale
+            unit[unit_index] = (1 - 1 / (1 + distance)) / (1 - transform.tail)
+        elseif isfinite(upper)
+            distance = (upper - physical[parameter_index]) / scale
+            unit[unit_index] = 1 - (1 - 1 / (1 + distance)) / (1 - transform.tail)
         else
-            z = 0.5 + atan((x[j] - t.location[j]) / s) / pi
-            u[k] = (z - t.tail) / (1 - 2 * t.tail)
+            mapped_coordinate = 0.5 +
+                atan((physical[parameter_index] - transform.location[parameter_index]) / scale) / pi
+            unit[unit_index] = (mapped_coordinate - transform.tail) / (1 - 2 * transform.tail)
         end
     end
-    (any(<(-1e-12), u) || any(>(1 + 1e-12), u)) &&
+    (any(<(-1e-12), unit) || any(>(1 + 1e-12), unit)) &&
         throw(ArgumentError("parameters exceed the finite tail cutoff"))
-    return clamp.(u, 0.0, 1.0)
+    return clamp.(unit, 0.0, 1.0)
 end
 
 _json_number(v::Float64) = isfinite(v) ? v : string(v)
 
-function specification(t::BoxTransform)
+function specification(transform::BoxTransform)
     return Dict{String,Any}(
-        "bounds" => [[_json_number(lo), _json_number(hi)] for (lo, hi) in zip(t.lower, t.upper)],
-        "scale" => copy(t.scale), "location" => copy(t.location), "tail" => t.tail)
+        "bounds" => [[_json_number(lo), _json_number(hi)] for (lo, hi) in zip(transform.lower, transform.upper)],
+        "scale" => copy(transform.scale),
+        "location" => copy(transform.location),
+        "tail" => transform.tail,
+    )
 end

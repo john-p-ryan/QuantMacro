@@ -50,8 +50,14 @@ struct LocalResult
 end
 
 function Base.Dict(r::LocalResult)
-    return Dict{String,Any}("index" => r.index, "unit" => r.unit, "x" => r.x, "fun" => r.fun,
-                            "converged" => r.converged, "message" => r.message)
+    return Dict{String,Any}(
+        "index" => r.index,
+        "unit" => r.unit,
+        "x" => r.x,
+        "fun" => r.fun,
+        "converged" => r.converged,
+        "message" => r.message,
+    )
 end
 
 function LocalResult(d::AbstractDict)
@@ -157,53 +163,66 @@ function _commit!(store::Store, record::Dict{String,Any}; sync::Bool=false)
     return nothing
 end
 
-function _apply!(store::Store, r::Dict{String,Any})
-    t = r["t"]
-    if t == "meta"
-        store.meta[r["k"]] = r["v"]
-    elseif t == "claim"
-        key, task = r["key"], r["task"]
+function _apply!(store::Store, record::Dict{String,Any})
+    record_type = record["t"]
+    if record_type == "meta"
+        store.meta[record["k"]] = record["v"]
+    elseif record_type == "claim"
+        key, task = record["key"], record["task"]
         store.n_attempts += 1
-        store.evaluations[key] = EvalRecord(key, store.n_attempts, get(r, "screening", false),
-                                            _float_vector(r["unit"]),
-                                            _float_vector(r["parameters"]), :pending, NaN, nothing, nothing,
-                                            nothing, 0.0, Float64(r["started"]))
+        store.evaluations[key] = EvalRecord(
+            key,
+            store.n_attempts,
+            get(record, "screening", false),
+            _float_vector(record["unit"]),
+            _float_vector(record["parameters"]),
+            :pending,
+            NaN,
+            nothing,
+            nothing,
+            nothing,
+            0.0,
+            Float64(record["started"]),
+        )
         store.attempts_by_task[task] = get(store.attempts_by_task, task, 0) + 1
         push!(get!(store.task_points, task, Set{String}()), key)
-    elseif t == "hit"
-        push!(get!(store.task_points, r["task"], Set{String}()), r["key"])
-    elseif t == "finish"
-        rec = store.evaluations[r["key"]]
-        rec.status = Symbol(r["status"])
-        rec.value = r["value"] === nothing ? NaN : Float64(r["value"])
-        rec.moments = _float_vector(r["moments"])
-        rec.residuals = _float_vector(r["residuals"])
-        rec.error = r["error"]
-        rec.seconds = Float64(r["seconds"])
-        rec.updated = Float64(r["updated"])
+    elseif record_type == "hit"
+        push!(get!(store.task_points, record["task"], Set{String}()), record["key"])
+    elseif record_type == "finish"
+        entry = store.evaluations[record["key"]]
+        entry.status = Symbol(record["status"])
+        entry.value = record["value"] === nothing ? NaN : Float64(record["value"])
+        entry.moments = _float_vector(record["moments"])
+        entry.residuals = _float_vector(record["residuals"])
+        entry.error = record["error"]
+        entry.seconds = Float64(record["seconds"])
+        entry.updated = Float64(record["updated"])
         # Screening values of a staged run are not comparable with full-accuracy ones.
-        if rec.status === :ok && !rec.screening
-            best = store.best_key === nothing ? nothing : store.evaluations[store.best_key]
-            if best === nothing || (rec.value, rec.sequence, rec.key) < (best.value, best.sequence, best.key)
-                store.best_key = rec.key
+        if entry.status === :ok && !entry.screening
+            incumbent = store.best_key === nothing ? nothing : store.evaluations[store.best_key]
+            if incumbent === nothing ||
+               (entry.value, entry.sequence, entry.key) < (incumbent.value, incumbent.sequence, incumbent.key)
+                store.best_key = entry.key
             end
         end
-    elseif t == "abandon"
-        rec = get(store.evaluations, r["key"], nothing)
-        rec !== nothing && rec.status === :pending && (rec.status = :abandoned)
-    elseif t == "abandon_all"
-        for rec in values(store.evaluations)
-            rec.status === :pending && (rec.status = :abandoned)
+    elseif record_type == "abandon"
+        entry = get(store.evaluations, record["key"], nothing)
+        entry !== nothing && entry.status === :pending && (entry.status = :abandoned)
+    elseif record_type == "abandon_all"
+        for entry in values(store.evaluations)
+            entry.status === :pending && (entry.status = :abandoned)
         end
-    elseif t == "local"
-        id = Int(r["id"])
-        store.locals[id] = LocalRecord(id, _float_vector(r["start"]), _float_vector(r["seed"]), :pending, nothing)
-    elseif t == "local_done"
-        rec = store.locals[Int(r["id"])]
-        rec.status = Symbol(r["status"])
-        rec.result = r["result"] === nothing ? nothing : LocalResult(r["result"])
+    elseif record_type == "local"
+        id = Int(record["id"])
+        store.locals[id] = LocalRecord(
+            id, _float_vector(record["start"]), _float_vector(record["seed"]), :pending, nothing,
+        )
+    elseif record_type == "local_done"
+        entry = store.locals[Int(record["id"])]
+        entry.status = Symbol(record["status"])
+        entry.result = record["result"] === nothing ? nothing : LocalResult(record["result"])
     else
-        throw(ErrorException("unknown journal record type $(repr(t))"))
+        throw(ErrorException("unknown journal record type $(repr(record_type))"))
     end
     return nothing
 end
@@ -271,13 +290,13 @@ function claim!(store::Store, unit, parameters, task::AbstractString, local_limi
     unit = _canonical(unit)
     key = point_key(unit; screening=screening)
     lock(store.lock) do
-        rec = get(store.evaluations, key, nothing)
-        if rec !== nothing && rec.status in (:ok, :failed, :error)
+        cached_record = get(store.evaluations, key, nothing)
+        if cached_record !== nothing && cached_record.status in (:ok, :failed, :error)
             if !(key in get(store.task_points, task, Set{String}()))
                 _commit!(store, Dict{String,Any}("t" => "hit", "task" => task, "key" => key))
             end
-            rec.status === :error && return (:error, key, something(rec.error, ""))
-            return (rec.status, key, rec.status === :ok ? rec.value : nothing)
+            cached_record.status === :error && return (:error, key, something(cached_record.error, ""))
+            return (cached_record.status, key, cached_record.status === :ok ? cached_record.value : nothing)
         end
         if store.n_attempts >= store.meta["max_evals"]
             return (:budget, key, nothing)
@@ -289,12 +308,17 @@ function claim!(store::Store, unit, parameters, task::AbstractString, local_limi
         if local_limit !== nothing && get(store.attempts_by_task, task, 0) >= local_limit
             return (:local_budget, key, nothing)
         end
-        if rec === nothing || rec.status === :abandoned
-            record = Dict{String,Any}("t" => "claim", "key" => key, "unit" => unit,
-                                      "parameters" => Vector{Float64}(parameters),
-                                      "task" => String(task), "started" => time())
-            screening && (record["screening"] = true)
-            _commit!(store, record)
+        if cached_record === nothing || cached_record.status === :abandoned
+            claim_record = Dict{String,Any}(
+                "t" => "claim",
+                "key" => key,
+                "unit" => unit,
+                "parameters" => Vector{Float64}(parameters),
+                "task" => String(task),
+                "started" => time(),
+            )
+            screening && (claim_record["screening"] = true)
+            _commit!(store, claim_record)
             return (:claimed, key, nothing)
         end
         return (:pending, key, nothing)
@@ -305,9 +329,17 @@ function finish!(store::Store, key::AbstractString; value=nothing, moments=nothi
                  error=nothing, seconds=0.0, unexpected::Bool=false)
     status = unexpected ? "error" : (value === nothing ? "failed" : "ok")
     lock(store.lock) do
-        _commit!(store, Dict{String,Any}("t" => "finish", "key" => String(key), "status" => status,
-                                         "value" => value, "moments" => moments, "residuals" => residuals,
-                                         "error" => error, "seconds" => Float64(seconds), "updated" => time()))
+        _commit!(store, Dict{String,Any}(
+            "t" => "finish",
+            "key" => String(key),
+            "status" => status,
+            "value" => value,
+            "moments" => moments,
+            "residuals" => residuals,
+            "error" => error,
+            "seconds" => Float64(seconds),
+            "updated" => time(),
+        ))
     end
     return nothing
 end
@@ -336,10 +368,10 @@ function best(store::Store, task=nothing)
         keys === nothing && return nothing
         winner = nothing
         for key in keys
-            rec = store.evaluations[key]
-            (rec.status === :ok && !rec.screening) || continue
-            if winner === nothing || (rec.value, rec.sequence, rec.key) < (winner.value, winner.sequence, winner.key)
-                winner = rec
+            record = store.evaluations[key]
+            (record.status === :ok && !record.screening) || continue
+            if winner === nothing || (record.value, record.sequence, record.key) < (winner.value, winner.sequence, winner.key)
+                winner = record
             end
         end
         return winner
@@ -362,17 +394,24 @@ local_row(store::Store, index::Integer) = lock(() -> store.locals[Int(index)], s
 
 function create_local!(store::Store, index::Integer, start, seed)
     lock(store.lock) do
-        _commit!(store, Dict{String,Any}("t" => "local", "id" => Int(index), "start" => Vector{Float64}(start),
-                                         "seed" => Vector{Float64}(seed)); sync=true)
+        _commit!(store, Dict{String,Any}(
+            "t" => "local",
+            "id" => Int(index),
+            "start" => Vector{Float64}(start),
+            "seed" => Vector{Float64}(seed),
+        ); sync=true)
     end
     return nothing
 end
 
 function finish_local!(store::Store, index::Integer, result::LocalResult, complete::Bool)
     lock(store.lock) do
-        _commit!(store, Dict{String,Any}("t" => "local_done", "id" => Int(index),
-                                         "status" => complete ? "done" : "pending",
-                                         "result" => Dict(result)); sync=true)
+        _commit!(store, Dict{String,Any}(
+            "t" => "local_done",
+            "id" => Int(index),
+            "status" => complete ? "done" : "pending",
+            "result" => Dict(result),
+        ); sync=true)
     end
     return nothing
 end

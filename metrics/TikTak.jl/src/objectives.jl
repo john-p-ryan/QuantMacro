@@ -68,34 +68,39 @@ struct MomentObjective{M}
 end
 
 function MomentObjective(model, target::AbstractVector{<:Real}; weights=nothing, scales=nothing)
-    t = Vector{Float64}(target)
-    (isempty(t) || !all(isfinite, t)) && throw(ArgumentError("target must be a nonempty finite vector"))
-    n = length(t)
-    s = _broadcast_vector(scales, 1.0, n, "scales")
-    (all(isfinite, s) && all(>(0), s)) || throw(ArgumentError("moment scales must be positive and finite"))
+    targets = Vector{Float64}(target)
+    (isempty(targets) || !all(isfinite, targets)) &&
+        throw(ArgumentError("target must be a nonempty finite vector"))
+    n_moments = length(targets)
+    moment_scales = _broadcast_vector(scales, 1.0, n_moments, "scales")
+    (all(isfinite, moment_scales) && all(>(0), moment_scales)) ||
+        throw(ArgumentError("moment scales must be positive and finite"))
     if weights === nothing
-        w = ones(n)
-        factor = ones(n)
+        weight_values = ones(n_moments)
+        factor = ones(n_moments)
     elseif weights isa AbstractVector
-        w = Vector{Float64}(weights)
-        length(w) == n || throw(ArgumentError("weights must be a diagonal vector or square matrix"))
-        all(isfinite, w) || throw(ArgumentError("weights must be finite"))
-        any(<(0), w) && throw(ArgumentError("diagonal weights cannot be negative"))
-        factor = sqrt.(w)
+        weight_values = Vector{Float64}(weights)
+        length(weight_values) == n_moments ||
+            throw(ArgumentError("weights must be a diagonal vector or square matrix"))
+        all(isfinite, weight_values) || throw(ArgumentError("weights must be finite"))
+        any(<(0), weight_values) && throw(ArgumentError("diagonal weights cannot be negative"))
+        factor = sqrt.(weight_values)
     elseif weights isa AbstractMatrix
-        w = Matrix{Float64}(weights)
-        size(w) == (n, n) || throw(ArgumentError("weights must be a diagonal vector or square matrix"))
-        all(isfinite, w) || throw(ArgumentError("weights must be finite"))
-        isapprox(w, w'; rtol=1e-10, atol=1e-12) || throw(ArgumentError("weight matrix must be symmetric"))
-        λ, V = eigen(Symmetric((w + w') / 2))
-        if minimum(λ) < -1e-12 * max(1.0, maximum(abs, λ))
+        weight_values = Matrix{Float64}(weights)
+        size(weight_values) == (n_moments, n_moments) ||
+            throw(ArgumentError("weights must be a diagonal vector or square matrix"))
+        all(isfinite, weight_values) || throw(ArgumentError("weights must be finite"))
+        isapprox(weight_values, weight_values'; rtol=1e-10, atol=1e-12) ||
+            throw(ArgumentError("weight matrix must be symmetric"))
+        eigenvalues, eigenvectors = eigen(Symmetric((weight_values + weight_values') / 2))
+        if minimum(eigenvalues) < -1e-12 * max(1.0, maximum(abs, eigenvalues))
             throw(ArgumentError("weight matrix must be positive semidefinite"))
         end
-        factor = sqrt.(max.(λ, 0.0)) .* V'   # factor' * factor == W
+        factor = sqrt.(max.(eigenvalues, 0.0)) .* eigenvectors'   # factor' * factor == W
     else
         throw(ArgumentError("weights must be a diagonal vector or square matrix"))
     end
-    return MomentObjective(model, t, s, w, factor)
+    return MomentObjective(model, targets, moment_scales, weight_values, factor)
 end
 
 function (objective::MomentObjective)(parameters)
@@ -111,9 +116,10 @@ function (objective::MomentObjective)(parameters)
 end
 
 function specification(objective::MomentObjective)
-    w = objective.weights
+    weights = objective.weights
     return Dict{String,Any}(
         "target" => copy(objective.target),
-        "weights" => w isa Vector ? copy(w) : [collect(row) for row in eachrow(w)],
-        "scales" => copy(objective.scales))
+        "weights" => weights isa Vector ? copy(weights) : [collect(row) for row in eachrow(weights)],
+        "scales" => copy(objective.scales),
+    )
 end

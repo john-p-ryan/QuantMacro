@@ -44,11 +44,28 @@ struct TikTakConfig
     target_value::Union{Nothing,Float64}
     failure_exceptions::Tuple
 
-    function TikTakConfig(; n_samples=256, n_local=nothing, max_evals=10_000, local_max_evals=200, seed=0,
-                          local_method=NelderMeadLocal(), initial_step=0.1, x_tol=1e-5, f_tol=1e-8,
-                          mixing_min=0.1, mixing_max=0.995, mixing_power=0.5, max_seconds=nothing,
-                          target_value=nothing, failure_exceptions=(ModelEvaluationError,))
-        for (name, value) in (("n_samples", n_samples), ("max_evals", max_evals), ("local_max_evals", local_max_evals))
+    function TikTakConfig(;
+        n_samples=256,
+        n_local=nothing,
+        max_evals=10_000,
+        local_max_evals=200,
+        seed=0,
+        local_method=NelderMeadLocal(),
+        initial_step=0.1,
+        x_tol=1e-5,
+        f_tol=1e-8,
+        mixing_min=0.1,
+        mixing_max=0.995,
+        mixing_power=0.5,
+        max_seconds=nothing,
+        target_value=nothing,
+        failure_exceptions=(ModelEvaluationError,),
+    )
+        for (name, value) in (
+            ("n_samples", n_samples),
+            ("max_evals", max_evals),
+            ("local_max_evals", local_max_evals),
+        )
             _positive_int(value) || throw(ArgumentError("$name must be a positive integer"))
         end
         (n_local === nothing || _positive_int(n_local)) ||
@@ -67,11 +84,23 @@ struct TikTakConfig
         failures = Tuple(failure_exceptions)
         (all(T -> T isa Type && T <: Exception, failures) && ModelEvaluationError in failures) ||
             throw(ArgumentError("failure_exceptions must be exception types and include ModelEvaluationError"))
-        return new(Int(n_samples), n_local === nothing ? nothing : Int(n_local), Int(max_evals),
-                   Int(local_max_evals), Int(seed), local_method, Float64(initial_step), Float64(x_tol),
-                   Float64(f_tol), Float64(mixing_min), Float64(mixing_max), Float64(mixing_power),
-                   max_seconds === nothing ? nothing : Float64(max_seconds),
-                   target_value === nothing ? nothing : Float64(target_value), failures)
+        return new(
+            Int(n_samples),
+            n_local === nothing ? nothing : Int(n_local),
+            Int(max_evals),
+            Int(local_max_evals),
+            Int(seed),
+            local_method,
+            Float64(initial_step),
+            Float64(x_tol),
+            Float64(f_tol),
+            Float64(mixing_min),
+            Float64(mixing_max),
+            Float64(mixing_power),
+            max_seconds === nothing ? nothing : Float64(max_seconds),
+            target_value === nothing ? nothing : Float64(target_value),
+            failures,
+        )
     end
 end
 
@@ -127,11 +156,18 @@ has_solution(r::TikTakResult) = r.x !== nothing && isfinite(r.fun)
 
 function to_dict(r::TikTakResult)
     return Dict{String,Any}(
-        "x" => r.x, "fun" => isfinite(r.fun) ? r.fun : nothing, "moments" => r.moments,
-        "residuals" => r.residuals, "n_evals" => r.n_evals, "n_failed" => r.n_failed,
-        "n_local_completed" => r.n_local_completed, "status" => string(r.status),
-        "message" => r.message, "run_dir" => r.run_dir,
-        "local_results" => [Dict(l) for l in r.local_results])
+        "x" => r.x,
+        "fun" => isfinite(r.fun) ? r.fun : nothing,
+        "moments" => r.moments,
+        "residuals" => r.residuals,
+        "n_evals" => r.n_evals,
+        "n_failed" => r.n_failed,
+        "n_local_completed" => r.n_local_completed,
+        "status" => string(r.status),
+        "message" => r.message,
+        "run_dir" => r.run_dir,
+        "local_results" => [Dict(l) for l in r.local_results],
+    )
 end
 
 function Base.show(io::IO, r::TikTakResult)
@@ -206,18 +242,18 @@ function _drain!(done::Channel, pending::Set{Int})
 end
 
 function _screen(run_id, points, config, executor, store)
-    n = length(points)
-    values = Vector{Union{Nothing,Float64}}(nothing, n)
+    n_points = length(points)
+    values = Vector{Union{Nothing,Float64}}(nothing, n_points)
     done = Channel{Any}(Inf)
     pending = Set{Int}()
     next_index, stopped = 1, false
     try
-        while !isempty(pending) || (next_index <= n && !stopped)
-            while !stopped && next_index <= n && length(pending) < capacity(executor)
-                i = next_index
+        while !isempty(pending) || (next_index <= n_points && !stopped)
+            while !stopped && next_index <= n_points && length(pending) < capacity(executor)
+                index = next_index
                 next_index += 1
-                submit!(executor, done, i, _screen_job, run_id, i, points[i])
-                push!(pending, i)
+                submit!(executor, done, index, _screen_job, run_id, index, points[index])
+                push!(pending, index)
             end
             isempty(pending) && break
             tag, (flag, payload) = take!(done)
@@ -231,9 +267,12 @@ function _screen(run_id, points, config, executor, store)
         rethrow()
     end
     any(isnothing, values) && return false
-    ranked = sort([i for i in 1:n if isfinite(values[i])]; by=i -> (values[i], i))
-    count = config.n_local === nothing ? max(1, ceil(Int, 0.1 * config.n_samples)) : config.n_local
-    put!(store, "seeds", [points[i] for i in ranked[1:min(count, end)]])
+    ranked = sort(
+        [index for index in 1:n_points if isfinite(values[index])];
+        by=index -> (values[index], index),
+    )
+    n_seeds = config.n_local === nothing ? max(1, ceil(Int, 0.1 * config.n_samples)) : config.n_local
+    put!(store, "seeds", [points[index] for index in ranked[1:min(n_seeds, end)]])
     return true
 end
 
@@ -244,30 +283,41 @@ function _target_reached(store, config)
 end
 
 function _search(run_id, seeds, config, executor, store, callback, directory)
-    rows = Dict(r.id => r for r in local_rows(store))
-    indices = [i for i in 1:length(seeds) if !(haskey(rows, i) && rows[i].status === :done)]
+    saved_rows = Dict(row.id => row for row in local_rows(store))
+    unfinished_indices = [
+        index for index in 1:length(seeds)
+        if !(haskey(saved_rows, index) && saved_rows[index].status === :done)
+    ]
     done = Channel{Any}(Inf)
     pending = Set{Int}()
     position = 1
     try
-        while !isempty(pending) || position <= length(indices)
-            done_results = [r.result for r in local_rows(store) if r.status === :done && r.result !== nothing]
-            feasible = [r for r in done_results if r.fun !== nothing]
-            incumbent = isempty(feasible) ? nothing : feasible[argmin([(r.fun, r.index) for r in feasible])]
+        while !isempty(pending) || position <= length(unfinished_indices)
+            completed_results = [
+                row.result for row in local_rows(store)
+                if row.status === :done && row.result !== nothing
+            ]
+            feasible = [result for result in completed_results if result.fun !== nothing]
+            incumbent = isempty(feasible) ? nothing :
+                feasible[argmin([(result.fun, result.index) for result in feasible])]
             # Bootstrap the best Sobol seed before opening the parallel pipeline.
-            cap = isempty(done_results) ? 1 : capacity(executor)
-            stop = exhausted(store) || _target_reached(store, config)
-            while !stop && position <= length(indices) && length(pending) < cap
-                i = indices[position]
+            job_capacity = isempty(completed_results) ? 1 : capacity(executor)
+            stopped = exhausted(store) || _target_reached(store, config)
+            while !stopped && position <= length(unfinished_indices) && length(pending) < job_capacity
+                index = unfinished_indices[position]
                 position += 1
-                if !haskey(rows, i)
-                    seed = seeds[i]
-                    weight = clamp((i / length(seeds))^config.mixing_power, config.mixing_min, config.mixing_max)
-                    start = incumbent === nothing ? seed : (1 - weight) .* seed .+ weight .* incumbent.unit
-                    create_local!(store, i, start, seed)
+                if !haskey(saved_rows, index)
+                    seed = seeds[index]
+                    weight = clamp(
+                        (index / length(seeds))^config.mixing_power,
+                        config.mixing_min, config.mixing_max,
+                    )
+                    start = incumbent === nothing ? seed :
+                        (1 - weight) .* seed .+ weight .* incumbent.unit
+                    create_local!(store, index, start, seed)
                 end
-                submit!(executor, done, i, _local_job, run_id, i)
-                push!(pending, i)
+                submit!(executor, done, index, _local_job, run_id, index)
+                push!(pending, index)
             end
             isempty(pending) && break
             tag, (flag, payload) = take!(done)
@@ -292,9 +342,14 @@ function _result(store, directory, status::Symbol, message::AbstractString)
         record === nothing ? Inf : record.value,
         record === nothing || record.moments === nothing ? nothing : copy(record.moments),
         record === nothing || record.residuals === nothing ? nothing : copy(record.residuals),
-        n_attempts(store), n_failed(store), count(r -> r.status === :done, rows),
-        status, String(message), String(directory),
-        [r.result for r in rows if r.result !== nothing])
+        n_attempts(store),
+        n_failed(store),
+        count(r -> r.status === :done, rows),
+        status,
+        String(message),
+        String(directory),
+        [r.result for r in rows if r.result !== nothing],
+    )
 end
 
 """
@@ -335,9 +390,21 @@ Keyword arguments:
 and interrupted ones, across resumes; cached evaluations are free).
 `max_seconds` is a soft deadline: running model calls finish and are recorded.
 """
-function minimize(objective, bounds; config::TikTakConfig=TikTakConfig(), screen_objective=nothing,
-                  scale=nothing, location=nothing, tail=1e-6, run_dir=nothing, problem_id=nothing,
-                  resume::Bool=false, warm_start=nothing, workers=nothing, executor=nothing, callback=nothing)
+function minimize(
+    objective, bounds;
+    config::TikTakConfig=TikTakConfig(),
+    screen_objective=nothing,
+    scale=nothing,
+    location=nothing,
+    tail=1e-6,
+    run_dir=nothing,
+    problem_id=nothing,
+    resume::Bool=false,
+    warm_start=nothing,
+    workers=nothing,
+    executor=nothing,
+    callback=nothing,
+)
     transform = BoxTransform(bounds; scale=scale, location=location, tail=tail)
     # With no free parameter there is no local stage, so the single point is evaluated at full accuracy.
     staged = screen_objective !== nothing && transform.dimension > 0
@@ -353,9 +420,12 @@ function minimize(objective, bounds; config::TikTakConfig=TikTakConfig(), screen
     (resume && warm_start !== nothing) &&
         throw(ArgumentError("warm_start is for new runs; resume reuses saved screening points"))
     spec = Dict{String,Any}(
-        "schema" => 1, "problem_id" => String(problem_id), "transform" => specification(transform),
+        "schema" => 1,
+        "problem_id" => String(problem_id),
+        "transform" => specification(transform),
         "algorithm" => specification(config),
-        "moments" => objective isa MomentObjective ? specification(objective) : nothing)
+        "moments" => objective isa MomentObjective ? specification(objective) : nothing,
+    )
     if staged
         spec["screen_moments"] = screen_objective isa MomentObjective ? specification(screen_objective) : nothing
     end
@@ -372,8 +442,8 @@ function minimize(objective, bounds; config::TikTakConfig=TikTakConfig(), screen
         initialize!(store, spec; resume=resume, max_evals=config.max_evals, deadline=deadline)
         points = _point_list(get(store, "points"))
         if points === nothing
-            points = transform.dimension > 0 ? sobol_points(transform.dimension, config.n_samples, config.seed) :
-                     [Float64[]]
+            points = transform.dimension > 0 ?
+                sobol_points(transform.dimension, config.n_samples, config.seed) : [Float64[]]
             if warm_start !== nothing
                 append!(points, to_unit(transform, x) for x in _warm_rows(warm_start, transform))
             end

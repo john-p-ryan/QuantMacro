@@ -1,6 +1,8 @@
 # TikTak.jl
 
-A standalone Julia package for global optimization and structural estimation.
+A model-agnostic Julia package for global optimization and structural estimation.
+The algorithm is based on the TikTak method described by
+[Arnoud, Guvenen, and Kleineberg (2022)](#reference).
 TikTak screens scrambled Sobol points, then combines promising starting points
 with the best completed local solutions to launch derivative-free local searches.
 It accepts scalar losses or models that return moments, supports serial and
@@ -156,3 +158,9 @@ with worker, budget, and resume options.
 - [local.jl](src/local.jl): local optimizer interfaces, built-in methods, and model evaluation handling.
 - [executors.jl](src/executors.jl): serial, threaded, and distributed job execution.
 - [storage.jl](src/storage.jl): evaluation caching, budget tracking, journals, snapshots, and restart state.
+
+## Reference
+
+Arnoud, Antoine, Fatih Guvenen, and Tatjana Kleineberg (2022).
+[*Benchmarking Global Optimizers*](https://www.fatihguvenen.com/s/AGK2022_v57_FG.pdf).
+Working paper, November 23.
