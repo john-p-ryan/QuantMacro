@@ -19,11 +19,16 @@ using Sobol: SobolSeq, next!
 using FileWatching.Pidfile: mkpidlock, PidlockedError
 
 export minimize, TikTakConfig, TikTakResult, LocalResult, has_solution, load_estimates,
+       load_evaluations, SavedEvaluation,
        MomentObjective, Evaluation, ModelEvaluationError,
        BoxTransform, to_parameters, to_unit,
        LocalMethod, NelderMeadLocal, PatternSearchLocal, NLoptLocal, CustomLocal,
        AbstractExecutor, InlineExecutor, ThreadedExecutor, DistributedExecutor,
-       sobol_points
+       sobol_points,
+       moment_jacobian, MomentJacobian, identification, IdentificationReport,
+       parameter_covariance, ParameterCovariance, wald_intervals,
+       fit_summary, FitSummary, search_summary, SearchSummary, LocalMinimum,
+       binscatter, binscatter_data
 
 include("objectives.jl")
 include("transforms.jl")
@@ -31,5 +36,8 @@ include("storage.jl")
 include("local.jl")
 include("executors.jl")
 include("solver.jl")
+include("summaries.jl")
+include("binscatter.jl")
+include("inference.jl")
 
 end # module

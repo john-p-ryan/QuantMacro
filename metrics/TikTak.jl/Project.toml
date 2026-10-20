@@ -14,19 +14,23 @@ Sobol = "ed01d8cd-4d21-5b2a-85b4-cc3bdc58bad4"
 
 [weakdeps]
 NLopt = "76087f3c-5699-56af-9a33-bf431cd00edd"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 
 [extensions]
 TikTakNLoptExt = "NLopt"
+TikTakPlotsExt = "Plots"
 
 [compat]
 JSON = "1"
 NLopt = "1"
+Plots = "1"
 Sobol = "1"
 julia = "1.10"
 
 [extras]
 NLopt = "76087f3c-5699-56af-9a33-bf431cd00edd"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "NLopt"]
+test = ["Test", "NLopt", "Plots"]

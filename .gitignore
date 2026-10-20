@@ -17,3 +17,6 @@ AGENTS.md
 # Julia package manifests (packages ship Project.toml only; root Manifest stays tracked)
 metrics/TikTak.jl/Manifest.toml
 tools/Spline/Manifest.toml
+
+# Local estimation roadmap
+metrics/TikTak.jl/TODO.md

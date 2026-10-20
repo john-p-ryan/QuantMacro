@@ -97,6 +97,8 @@ Additional keywords go directly to `minimize`:
 - **Cheaper screening:** `screen_objective=coarse_loss` ranks starting points;
   local searches and the reported result use the main objective.
 - **Progress:** `callback=r -> println(r.fun)` runs after each completed local search.
+- **Workspace history:** `store_evaluations=true` retains parameter points and
+  their evaluations in `result.evaluations` (including callback snapshots).
 
 ## Parallel execution
 
@@ -137,6 +139,118 @@ their objective values are recomputed in the new run.
 `has_solution(result)` indicates a finite feasible estimate. `:completed` means
 the allocated searches finished; it does not guarantee global optimality.
 
+## Parameter points and moment evaluations
+
+Keep the evaluation history in your Julia workspace when the search returns:
+
+```julia
+result = minimize(criterion, bounds; config, store_evaluations=true)
+evaluations = result.evaluations
+
+evaluations[1].parameters  # Physical parameters passed to the model
+evaluations[1].moments     # Model moments at that same point
+evaluations[1].residuals   # Scaled, weighted residuals for MomentObjective
+evaluations[1].value       # Objective value
+evaluations[1].status      # :ok, :failed, :error, :abandoned, or :pending
+```
+
+Retrieve evaluations later without rerunning the model or parsing JSON:
+
+```julia
+evaluations = load_evaluations(result)          # Workspace snapshot, or disk if not retained
+evaluations = load_evaluations("model-run")     # Latest saved state, including resumes
+good = load_evaluations(result; status=:ok, stage=:full)
+
+# For a nonempty set of successful moment evaluations, one evaluation per row:
+parameters = stack([r.parameters for r in good]; dims=1)
+moments = stack([r.moments for r in good]; dims=1)
+losses = [r.value for r in good]
+
+failures = load_evaluations(result; status=:failed)
+[(r.parameters, r.error) for r in failures]
+```
+
+Records stay paired and ordered by model-call attempt, rather than completion
+time. Repeated cache hits appear once; an abandoned point that is retried keeps
+its latest attempt. `screening=true` marks the cheaper objective of a staged
+run; use `stage=:full` or `stage=:screening` to analyze the two criteria separately.
+A scalar objective has no moments unless it returns `Evaluation(...; moments=...)`;
+failed evaluations may also have `moments === nothing`. Only stack moment vectors
+of equal length.
+
+`store_evaluations` defaults to `false` to avoid retaining an extra copy of the
+cache after the search. When enabled, it includes prior evaluations on resume
+and keeps an independent snapshot in the returned result, without creating
+global variables. Callback snapshots can include pending calls from other
+workers. The journal is always saved, and `result.json` remains a compact
+best-estimate snapshot. If a run throws an error, retrieve its recorded
+evaluations with `load_evaluations(run_dir)` using an explicit run directory.
+
+## Diagnostics and inference
+
+Plot every moment against every parameter using saved evaluations, without
+rerunning the model. Install Plots in your environment (`Pkg.add("Plots")`), then:
+
+```julia
+using Plots
+
+panel = binscatter(result; nbins=20,
+                   parameter_names=["rho", "sigma"], moment_names=["var", "cov"])
+display(panel)
+savefig(panel, "moment-binscatter.png")
+```
+
+The panel has **moments as rows and parameters as columns**, like the Jacobian;
+each cell plots mean raw moments against mean physical parameters in approximately
+equal-frequency bins. Tied parameter values stay together, so some columns can
+have fewer bins. Names cover all original parameters and moments. Select columns
+with `parameters=[2, 1]`, or `parameters=jac.free` to match a Jacobian that omits
+fixed parameters. Extra plot keywords such as `size=(1000, 800)` and `markersize=3`
+customize the figure. Plots is optional and only needed to render the panel.
+
+`binscatter` also accepts a run directory or a vector from `load_evaluations`.
+It uses successful finite moment evaluations from `stage=:full` by default;
+pass `stage=:screening` to examine the cheaper objective separately. Scalar
+evaluations without moments and failed evaluations are skipped. For the bin
+means and counts without a plotting dependency, use `binscatter_data` with the
+same options; its `panels[i, j]` contains `x`, `y`, and `count` vectors.
+
+These plots show marginal associations in the search history: other parameters
+vary within each bin, and local searches concentrate evaluations near minima.
+Their slopes therefore need not equal Jacobian derivatives holding other
+parameters fixed.
+
+After a moment-matching search, check the search, the fit, and local
+identification before interpreting standard errors:
+
+```julia
+summary = search_summary(result; moment_names=["var", "cov"])
+summary.minima[1].fit             # Targets, model moments, errors, loss contributions
+
+jac = moment_jacobian(criterion, result.x, bounds; names=["rho", "sigma"])
+identification(jac, criterion)    # Singular values and weak parameter combinations
+estimates = parameter_covariance(jac, criterion; covariance=Σ, nobs=N)
+wald_intervals(estimates)         # Throws if rank deficient or near a bound
+```
+
+- `search_summary` groups completed local searches into distinct minima and
+  reports how often each was found, solver convergence, and distance to bounds.
+  A best minimum found only once suggests a poor search; large errors at every
+  minimum suggest poor fit.
+- `moment_jacobian` takes derivatives through `jacobian=` or uses finite
+  differences in original parameter units, one-sided at bounds. It checks that
+  the moments are reproducible and reports how the Jacobian changes when the
+  step is halved and doubled. With simulated moments, choose `step` large
+  relative to any discreteness. Pass `mapper=pmap` to use workers.
+- `identification` scales each parameter's column to unit norm by default; pass
+  `parameter_scales=:raw` or a vector of parameter units for other normalizations.
+- `parameter_covariance` computes the sandwich covariance consistently with the
+  objective's `scales` and `weights`. `covariance` is the asymptotic covariance Σ
+  of √N times the raw moment errors, so Σ/`nobs` is their covariance; include
+  simulation noise in Σ.
+
+These are local diagnostics: they do not establish global identification.
+
 ## Examples and tests
 
 ```sh
@@ -153,6 +267,9 @@ with worker, budget, and resume options.
 
 - [TikTak.jl](src/TikTak.jl): package entry point, exports, and module assembly.
 - [solver.jl](src/solver.jl): search configuration, Sobol screening, multistart scheduling, and results.
+- [summaries.jl](src/summaries.jl): moment fit decompositions and distinct local minima of a saved run.
+- [binscatter.jl](src/binscatter.jl): moment-by-parameter bin means and optional Plots.jl panels.
+- [inference.jl](src/inference.jl): moment Jacobians, local identification, and sandwich standard errors.
 - [objectives.jl](src/objectives.jl): moment-matching criteria, evaluation diagnostics, and model failure types.
 - [transforms.jl](src/transforms.jl): maps bounded, unbounded, and fixed parameters to the unit box.
 - [local.jl](src/local.jl): local optimizer interfaces, built-in methods, and model evaluation handling.

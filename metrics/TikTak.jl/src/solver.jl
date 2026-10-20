@@ -136,6 +136,11 @@ points `n_failed`, the number of completed local searches, a `status`
 [`LocalResult`](@ref)s. `status == :completed` means the allocated searches
 finished, not that every local solver converged; [`has_solution`](@ref) means a
 finite feasible estimate exists, not global optimality.
+
+With `store_evaluations=true`, `evaluations` holds independent
+[`SavedEvaluation`](@ref) records for all cached points, including failures and
+cheaper screening evaluations, in attempt order. Otherwise it is `nothing`;
+[`load_evaluations`](@ref) can still retrieve the journal later.
 """
 struct TikTakResult
     x::Union{Nothing,Vector{Float64}}
@@ -149,6 +154,19 @@ struct TikTakResult
     message::String
     run_dir::String
     local_results::Vector{LocalResult}
+    evaluations::Union{Nothing,Vector{SavedEvaluation}}
+end
+
+# Preserve the original positional constructor for callers constructing results.
+TikTakResult(x, fun, moments, residuals, n_evals, n_failed, n_local_completed,
+             status, message, run_dir, local_results) =
+    TikTakResult(x, fun, moments, residuals, n_evals, n_failed, n_local_completed,
+                 status, message, run_dir, local_results, nothing)
+
+function load_evaluations(result::TikTakResult; status::Symbol=:all, stage::Symbol=:all)
+    result.evaluations === nothing &&
+        return load_evaluations(result.run_dir; status=status, stage=stage)
+    return _evaluation_snapshot(result.evaluations; status=status, stage=stage)
 end
 
 """A feasible estimate was found; this is not a global-optimality certificate."""
@@ -282,7 +300,7 @@ function _target_reached(store, config)
     return record !== nothing && record.value <= config.target_value
 end
 
-function _search(run_id, seeds, config, executor, store, callback, directory)
+function _search(run_id, seeds, config, executor, store, callback, directory; store_evaluations=false)
     saved_rows = Dict(row.id => row for row in local_rows(store))
     unfinished_indices = [
         index for index in 1:length(seeds)
@@ -323,7 +341,8 @@ function _search(run_id, seeds, config, executor, store, callback, directory)
             tag, (flag, payload) = take!(done)
             delete!(pending, tag)
             flag === :error && throw(payload)   # Unexpected model/programming errors abort visibly.
-            snapshot = _result(store, directory, :running, "local search in progress")
+            snapshot = _result(store, directory, :running, "local search in progress";
+                               store_evaluations=store_evaluations && callback !== nothing)
             export_result(store, to_dict(snapshot))
             callback === nothing || callback(snapshot)
         end
@@ -334,7 +353,7 @@ function _search(run_id, seeds, config, executor, store, callback, directory)
     return nothing
 end
 
-function _result(store, directory, status::Symbol, message::AbstractString)
+function _result(store, directory, status::Symbol, message::AbstractString; store_evaluations=false)
     record = best(store)
     rows = local_rows(store)
     return TikTakResult(
@@ -349,6 +368,7 @@ function _result(store, directory, status::Symbol, message::AbstractString)
         String(message),
         String(directory),
         [r.result for r in rows if r.result !== nothing],
+        store_evaluations ? _evaluation_snapshot(store) : nothing,
     )
 end
 
@@ -385,6 +405,11 @@ Keyword arguments:
   serial execution.
 - `executor`: an [`AbstractExecutor`](@ref) instead of `workers`.
 - `callback(result)`: called on the coordinator after each completed local search.
+- `store_evaluations=false`: set to `true` to retain all parameter points, losses,
+  moments, and diagnostics in `result.evaluations` in the Julia workspace (also
+  in callback snapshots). This copies the evaluation cache and uses additional
+  memory; it does not create global variables. Disk journaling remains enabled
+  either way. See [`load_evaluations`](@ref) to retrieve or filter saved records.
 
 `max_evals` is a hard cumulative cap on model-call attempts (including failed
 and interrupted ones, across resumes; cached evaluations are free).
@@ -404,6 +429,7 @@ function minimize(
     workers=nothing,
     executor=nothing,
     callback=nothing,
+    store_evaluations::Bool=false,
 )
     transform = BoxTransform(bounds; scale=scale, location=location, tail=tail)
     # With no free parameter there is no local stage, so the single point is evaluated at full accuracy.
@@ -459,7 +485,8 @@ function minimize(
         screened = seeds !== nothing || _screen(run_id, points, config, executor, store)
         seeds = _point_list(get(store, "seeds"))
         if screened && seeds !== nothing && !isempty(seeds) && transform.dimension > 0
-            _search(run_id, seeds, config, executor, store, callback, directory)
+            _search(run_id, seeds, config, executor, store, callback, directory;
+                    store_evaluations=store_evaluations)
         end
         n_done = count(r -> r.status === :done, local_rows(store))
         incomplete = !screened || (transform.dimension > 0 && n_done < length(seeds))
@@ -471,7 +498,7 @@ function minimize(
         elseif incomplete
             status, message = :budget_exhausted, "evaluation or wall-clock budget exhausted; increase budget and resume"
         end
-        result = _result(store, directory, status, message)
+        result = _result(store, directory, status, message; store_evaluations=store_evaluations)
         export_result(store, to_dict(result))
         return result
     finally

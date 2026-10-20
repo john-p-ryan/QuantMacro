@@ -33,6 +33,10 @@ function Evaluation(value::Real; moments=nothing, residuals=nothing)
                       _optional_vector(residuals, "residuals"))
 end
 
+# Weights and their factors are stored as a vector when diagonal.
+_multiply(weights::Vector{Float64}, x) = weights .* x
+_multiply(weights::Matrix{Float64}, x) = weights * x
+
 _optional_vector(::Nothing, name) = nothing
 _optional_vector(v::AbstractVector{<:Real}, name) = Vector{Float64}(v)
 _optional_vector(v, name) = throw(ArgumentError("Evaluation.$name must be a real vector"))
@@ -111,7 +115,7 @@ function (objective::MomentObjective)(parameters)
         throw(ArgumentError("model moments have a different length than target"))
     all(isfinite, moments) || throw(ModelEvaluationError("model returned nonfinite moments"))
     errors = (moments .- objective.target) ./ objective.scales
-    residuals = objective.factor isa Vector ? objective.factor .* errors : objective.factor * errors
+    residuals = _multiply(objective.factor, errors)
     return Evaluation(dot(residuals, residuals), moments, residuals)
 end
 

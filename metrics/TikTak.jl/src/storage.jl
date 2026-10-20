@@ -33,6 +33,61 @@ mutable struct EvalRecord
 end
 
 """
+    SavedEvaluation
+
+A snapshot of one cached parameter point returned by [`load_evaluations`](@ref)
+or retained in `result.evaluations` with `store_evaluations=true`.
+
+`parameters` are in original model units; `unit` contains the free unit-box
+coordinates. `value` is the loss (`NaN` unless `status == :ok`). `moments` and
+`residuals` are vectors when supplied by the objective, otherwise `nothing`.
+`status` is `:ok`, `:failed`, `:error`, `:abandoned`, or `:pending`; `error`
+contains the failure message when available. `seconds` is evaluation runtime.
+
+`screening` is true only for the cheaper objective in a staged run, whose
+values must not be compared with full-accuracy values. `key` identifies the
+point and stage; `sequence` orders model-call attempts. Cached repeats appear
+once, and a retried abandoned point carries its latest attempt. Thus the number
+of records can be smaller than `result.n_evals`. Vectors are independent copies
+and can be edited without changing the optimizer or saved journal.
+"""
+struct SavedEvaluation
+    key::String
+    sequence::Int
+    screening::Bool
+    unit::Vector{Float64}
+    parameters::Vector{Float64}
+    status::Symbol
+    value::Float64
+    moments::Union{Nothing,Vector{Float64}}
+    residuals::Union{Nothing,Vector{Float64}}
+    error::Union{Nothing,String}
+    seconds::Float64
+end
+
+function _saved_evaluation(r)
+    return SavedEvaluation(r.key, r.sequence, r.screening, copy(r.unit),
+                           copy(r.parameters), r.status, r.value,
+                           r.moments === nothing ? nothing : copy(r.moments),
+                           r.residuals === nothing ? nothing : copy(r.residuals),
+                           r.error, r.seconds)
+end
+
+function _evaluation_snapshot(records; status::Symbol=:all, stage::Symbol=:all)
+    status in (:all, :ok, :failed, :error, :abandoned, :pending) ||
+        throw(ArgumentError("status must be :all, :ok, :failed, :error, :abandoned, or :pending"))
+    stage in (:all, :full, :screening) ||
+        throw(ArgumentError("stage must be :all, :full, or :screening"))
+    rows = SavedEvaluation[
+        _saved_evaluation(r) for r in records
+        if (status === :all || r.status === status) &&
+           (stage === :all || r.screening == (stage === :screening))
+    ]
+    sort!(rows; by=r -> r.sequence)
+    return rows
+end
+
+"""
     LocalResult
 
 Outcome of one local search: its seed `index`, the best point it evaluated in
@@ -469,4 +524,42 @@ function load_estimates(directory::AbstractString; limit::Integer=20)
     records = [r for r in values(store.evaluations) if r.status === :ok]
     sort!(records; by=r -> (r.screening, r.value, r.sequence, r.key))
     return [copy(r.parameters) for r in records[1:min(limit, end)]]
+end
+
+"""
+    load_evaluations(directory; status=:all, stage=:all) -> Vector{SavedEvaluation}
+    load_evaluations(result::TikTakResult; status=:all, stage=:all)
+
+Retrieve paired parameter points, losses, moments, residuals, and diagnostics
+in model-call attempt order, without evaluating the model. Pass a saved run
+directory or a result. A result uses its retained workspace snapshot if present,
+otherwise its `run_dir`. A retained snapshot describes that invocation; load
+the directory to read subsequent resumes.
+
+By default all cached points and statuses are included. Use `status=:ok` for
+successful evaluations and `stage=:full` to exclude cheaper screening values
+from a staged run (`stage=:screening` selects only those cheaper evaluations).
+Other status filters are `:failed`, `:error`, `:abandoned`, and `:pending`.
+Each call returns independent copies; see [`SavedEvaluation`](@ref).
+
+For nonempty successful records with equally sized moment vectors:
+```julia
+rows = load_evaluations(result; status=:ok, stage=:full)
+parameters = stack([r.parameters for r in rows]; dims=1) # evaluations × parameters
+moments = stack([r.moments for r in rows]; dims=1)       # evaluations × moments
+losses = [r.value for r in rows]
+```
+Scalar objectives have `moments === nothing` unless they return an `Evaluation`
+containing moments. Failed evaluations may also lack moments.
+"""
+function load_evaluations(directory::AbstractString; status::Symbol=:all, stage::Symbol=:all)
+    isfile(joinpath(directory, JOURNAL_NAME)) ||
+        throw(ArgumentError("no run history found in $directory"))
+    return _evaluation_snapshot(Store(directory; readonly=true); status=status, stage=stage)
+end
+
+function _evaluation_snapshot(store::Store; kwargs...)
+    lock(store.lock) do
+        return _evaluation_snapshot(values(store.evaluations); kwargs...)
+    end
 end
