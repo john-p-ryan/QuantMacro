@@ -261,21 +261,77 @@ end
 """
     ParameterCovariance
 
-Sandwich covariance of the free-parameter `estimate`. `covariance` and
-`standard_errors` are `NaN` when the weighted Jacobian is rank deficient.
-`near_bound[k]` marks estimates within `bound_se` standard errors of a finite
-bound (or on it). `regular` is true only with full rank, stable derivatives, and
-no flagged bound; `issues` explains any failure.
+Sandwich covariance of the free-parameter `estimate`, decomposed as
+`covariance = sampling_covariance + simulation_covariance`: the parts due to sampling
+error in the empirical moments and to simulation noise in the model moments.
+`simulation_covariance` is `nothing` when no simulation contribution was supplied, in
+which case the `covariance` passed in had to include it. All are `NaN` when the
+weighted Jacobian is rank deficient. `near_bound[k]` marks estimates within `bound_se`
+standard errors of a finite bound (or on it). `regular` is true only with full rank,
+stable derivatives, and no flagged bound; `issues` explains any failure. `parameters`
+is the full parameter vector, `free` the indices of the free parameters, and `lower`
+and `upper` their bounds, which [`delta_method`](@ref) uses.
 """
 struct ParameterCovariance
     names::Vector{String}
     estimate::Vector{Float64}
     covariance::Matrix{Float64}
     standard_errors::Vector{Float64}
+    sampling_covariance::Matrix{Float64}
+    simulation_covariance::Union{Nothing,Matrix{Float64}}
     rank::Int
     near_bound::Vector{Bool}
     regular::Bool
     issues::Vector{String}
+    parameters::Vector{Float64}
+    free::Vector{Int}
+    lower::Vector{Float64}
+    upper::Vector{Float64}
+end
+
+# Validated covariance `Σ / nobs` of the moment errors, in raw moment units.
+function _moment_covariance(covariance::AbstractMatrix{<:Real}, n_moments::Integer, nobs::Real;
+                            name="covariance", count="nobs")
+    sigma = Matrix{Float64}(covariance)
+    (n_moments >= 1 && size(sigma) == (n_moments, n_moments) && all(isfinite, sigma)) ||
+        throw(ArgumentError("$name must be a finite $n_moments × $n_moments matrix"))
+    isapprox(sigma, sigma'; rtol=1e-10, atol=1e-12) || throw(ArgumentError("$name must be symmetric"))
+    eigenvalues = eigvals(Symmetric(sigma))
+    eigenvalues[1] < -1e-10 * max(1.0, eigenvalues[end]) &&
+        throw(ArgumentError("$name must be positive semidefinite"))
+    (isfinite(nobs) && nobs > 0) || throw(ArgumentError("$count must be positive and finite"))
+    return sigma ./ nobs
+end
+_moment_covariance(covariance, n_moments, nobs; name="covariance", kwargs...) =
+    throw(ArgumentError("$name must be a real matrix"))
+
+# Covariances of the moment errors due to sampling (`Σ / nobs`) and to simulation
+# (`Σₛ / nₛ`, or `nothing` when not supplied), in raw moment units.
+function _error_covariances(n_moments; covariance, nobs, simulation_covariance=nothing,
+                            simulation_nobs=nothing, n_simulations=nothing)
+    sampling = _moment_covariance(covariance, n_moments, nobs)
+    if n_simulations !== nothing
+        (simulation_covariance === nothing && simulation_nobs === nothing) || throw(ArgumentError(
+            "pass either n_simulations or simulation_covariance with simulation_nobs, not both"))
+        (n_simulations isa Real && !(n_simulations isa Bool) && isfinite(n_simulations) && n_simulations > 0) ||
+            throw(ArgumentError("n_simulations must be positive and finite"))
+        return sampling, sampling ./ n_simulations
+    end
+    simulation_covariance === nothing && simulation_nobs === nothing && return sampling, nothing
+    (simulation_covariance === nothing || simulation_nobs === nothing) &&
+        throw(ArgumentError("simulation_covariance and simulation_nobs must be passed together"))
+    return sampling, _moment_covariance(simulation_covariance, n_moments, simulation_nobs;
+                                        name="simulation_covariance", count="simulation_nobs")
+end
+
+# Parameter covariance P S P' implied by a moment-error covariance `omega` (raw units),
+# where `projection` is the pseudoinverse of the column-scaled criterion Jacobian.
+function _sandwich(projection, column_scales, objective::MomentObjective, omega)
+    # In criterion-residual units the moment-error covariance is L D⁻¹ Ω D⁻¹ L'.
+    scaled = omega ./ (objective.scales .* objective.scales')
+    residual_covariance = _multiply(objective.factor, _multiply(objective.factor, scaled)')
+    normalized = projection * residual_covariance * projection'
+    return column_scales .* (normalized .+ normalized') ./ 2 .* column_scales'
 end
 
 """
@@ -283,15 +339,31 @@ end
 
 Sandwich covariance of a minimum-distance estimate,
 
-    V = (G'WG)⁻¹ G'W S W G (G'WG)⁻¹,   G = D⁻¹ J,   S = D⁻¹ (Σ / nobs) D⁻¹,
+    V = (G'WG)⁻¹ G'W S W G (G'WG)⁻¹,   G = D⁻¹ J,   S = D⁻¹ Ω D⁻¹,
 
-where `J` is the moment Jacobian, `W` and `D = diag(scales)` come from
-`objective`, and `Σ = covariance` is the asymptotic covariance of
-`√nobs (m̂ - m(θ₀))` in raw moment units, so `Σ / nobs` is the covariance of the
-moment errors. It must include simulation noise: with simulated moments from
-`R` independent samples the size of the data, a common choice is `(1 + 1/R)`
-times the data covariance. Pass the covariance of the moment errors itself with
-`nobs=1`. With `W = S⁻¹` this reduces to `(G'S⁻¹G)⁻¹`.
+where `J` is the moment Jacobian, `W` and `D = diag(scales)` come from `objective`, and
+`Ω` is the covariance of the difference between empirical and model moments in raw
+units. With fixed simulation draws drawn independently of the data, it has two parts,
+
+    Ω = Σ / nobs + Σₛ / nₛ,
+
+which give `V = V_sampling + V_simulation`:
+
+- `covariance = Σ` is the asymptotic covariance of `√nobs (m̂ - m(θ₀))` for the
+  empirical moments, so `Σ / nobs` is the covariance of their sampling error. Pass that
+  covariance itself with `nobs=1`.
+- `simulation_covariance = Σₛ` and `simulation_nobs = nₛ` describe the simulated moments
+  in the same way: `Σₛ / nₛ` is their covariance around `m(θ₀)` across independent sets
+  of draws. `Σₛ` may differ from `Σ`, for example when the model simulates a stationary
+  population but the data are a panel.
+- `n_simulations = R` is the common case `Σₛ = Σ`, `nₛ = R * nobs`: moments averaged over
+  `R` independent simulated samples with the size and design of the data, so that
+  `Ω = (1 + 1/R) Σ / nobs` (McFadden 1989; Lee & Ingram 1991).
+
+Omit the simulation keywords when the model moments are computed without simulation
+noise, for example from a stationary distribution on a grid, or when `Σ` already
+includes it. With `W = Ω⁻¹`, as built by [`inverse_covariance_weights`](@ref) from the
+same keywords without regularization, `V` reduces to `(G'Ω⁻¹G)⁻¹`.
 
 The estimate is not regular, and [`wald_intervals`](@ref) refuses it, when:
 - the weighted Jacobian has rank below the number of parameters (with columns
@@ -303,17 +375,12 @@ The estimate is not regular, and [`wald_intervals`](@ref) refuses it, when:
   cutoff of an infinite bound is reported by [`search_summary`](@ref) instead.
 """
 function parameter_covariance(jac::MomentJacobian, objective::MomentObjective;
-                              covariance::AbstractMatrix{<:Real}, nobs::Real,
-                              rank_tol::Real=sqrt(eps()), sensitivity_tol::Real=0.1, bound_se::Real=2)
-    n_moments = length(objective.target)
-    sigma = Matrix{Float64}(covariance)
-    (size(sigma) == (n_moments, n_moments) && all(isfinite, sigma)) ||
-        throw(ArgumentError("covariance must be a finite $n_moments × $n_moments matrix"))
-    isapprox(sigma, sigma'; rtol=1e-10, atol=1e-12) || throw(ArgumentError("covariance must be symmetric"))
-    eigenvalues = eigvals(Symmetric(sigma))
-    eigenvalues[1] < -1e-10 * max(1.0, eigenvalues[end]) &&
-        throw(ArgumentError("covariance must be positive semidefinite"))
-    (isfinite(nobs) && nobs > 0) || throw(ArgumentError("nobs must be positive and finite"))
+                              covariance, nobs::Real, simulation_covariance=nothing, simulation_nobs=nothing,
+                              n_simulations=nothing, rank_tol::Real=sqrt(eps()), sensitivity_tol::Real=0.1,
+                              bound_se::Real=2)
+    sampling, simulation = _error_covariances(length(objective.target); covariance=covariance, nobs=nobs,
+                                              simulation_covariance=simulation_covariance,
+                                              simulation_nobs=simulation_nobs, n_simulations=n_simulations)
     (isfinite(bound_se) && bound_se >= 0) || throw(ArgumentError("bound_se must be nonnegative"))
 
     criterion_jacobian = _criterion_jacobian(jac, objective)
@@ -323,17 +390,16 @@ function parameter_covariance(jac::MomentJacobian, objective::MomentObjective;
     rank = _numerical_rank(decomposition.S, rank_tol)
     issues = String[]
     if rank < n_free
-        covariance_matrix = fill(NaN, n_free, n_free)
+        sampling_matrix = fill(NaN, n_free, n_free)
+        simulation_matrix = simulation === nothing ? nothing : fill(NaN, n_free, n_free)
         push!(issues, "weighted moment Jacobian has rank $rank < $n_free parameters; see identification")
     else
-        # In criterion-residual units the moment-error covariance is L S L'.
-        scaled = (sigma ./ nobs) ./ (objective.scales .* objective.scales')
-        residual_covariance = _multiply(objective.factor, _multiply(objective.factor, scaled)')
         # Pseudoinverse of the column-scaled Jacobian: (A'A)⁻¹A' with A = L G C.
         projection = decomposition.V * (decomposition.U ./ decomposition.S')'
-        normalized = projection * residual_covariance * projection'
-        covariance_matrix = scales .* (normalized .+ normalized') ./ 2 .* scales'
+        sampling_matrix = _sandwich(projection, scales, objective, sampling)
+        simulation_matrix = simulation === nothing ? nothing : _sandwich(projection, scales, objective, simulation)
     end
+    covariance_matrix = simulation_matrix === nothing ? copy(sampling_matrix) : sampling_matrix .+ simulation_matrix
     for k in findall(>(sensitivity_tol), jac.sensitivity)
         push!(issues, "the derivative with respect to $(jac.names[k]) changes by $(_short(jac.sensitivity[k])) " *
                       "across step sizes")
@@ -346,18 +412,123 @@ function parameter_covariance(jac::MomentJacobian, objective::MomentObjective;
         push!(issues, distance[k] == 0 ? "$(jac.names[k]) is on a bound" :
                       "$(jac.names[k]) is within $(bound_se) standard errors of a bound")
     end
-    return ParameterCovariance(jac.names, estimate, covariance_matrix, standard_errors, rank, near_bound,
-                               isempty(issues), issues)
+    return ParameterCovariance(jac.names, estimate, covariance_matrix, standard_errors, sampling_matrix,
+                               simulation_matrix, rank, near_bound, isempty(issues), issues,
+                               copy(jac.parameters), copy(jac.free), copy(jac.lower), copy(jac.upper))
 end
 
 """
-    wald_intervals(result::ParameterCovariance; z=1.959963984540054) -> Matrix
+    DerivedCovariance
 
-Symmetric Wald intervals `estimate ± z * standard_errors` as rows `[lower upper]`
-(the default `z` gives 95% coverage). Throws unless `result.regular`, because
-rank deficiency, unstable derivatives, or a bound invalidates the normal approximation.
+Delta-method covariance of derived quantities `estimate = g(θ̂)`, built by
+[`delta_method`](@ref). `jacobian[i, k] = ∂gᵢ/∂θⱼ` for the free parameters `j = free[k]`
+of the [`ParameterCovariance`](@ref) it came from, and
+`covariance = jacobian * V * jacobian'`, with columns labelled by `parameter_names`, decomposed into `sampling_covariance` and
+`simulation_covariance` (or `nothing`) as for the parameters. `sensitivity` gives the
+step-size sensitivity of each column of `jacobian`. `regular` is false when the parameter
+covariance is not regular or the derivatives are unreliable; `issues` explains why.
 """
-function wald_intervals(result::ParameterCovariance; z::Real=1.959963984540054)
+struct DerivedCovariance
+    names::Vector{String}
+    estimate::Vector{Float64}
+    jacobian::Matrix{Float64}
+    parameter_names::Vector{String}
+    free::Vector{Int}
+    covariance::Matrix{Float64}
+    standard_errors::Vector{Float64}
+    sampling_covariance::Matrix{Float64}
+    simulation_covariance::Union{Nothing,Matrix{Float64}}
+    sensitivity::Vector{Float64}
+    regular::Bool
+    issues::Vector{String}
+end
+
+_as_rows(jacobian::AbstractVector) = reshape(jacobian, 1, :)
+_as_rows(jacobian) = jacobian
+
+"""
+    delta_method(estimates::ParameterCovariance, g; kwargs...) -> DerivedCovariance
+
+Delta-method uncertainty for derived quantities `g(θ)`, such as elasticities, steady-state
+objects, or counterfactual changes, at the estimate of `estimates`. `g` takes the full
+parameter vector, including fixed parameters, and returns a real number or vector; it may
+solve the model, and then must use the same simulation draws on every call. The
+covariance `G V G'`, with `G = ∂g/∂θ` at the estimate, keeps the split of `V` into
+sampling and simulation parts.
+
+Derivatives are taken as in [`moment_jacobian`](@ref), within the parameter bounds of
+`estimates`, with the same keywords `step`, `check_factors`, `mapper`, and
+`failure_exceptions`. Pass `jacobian` (a quantities × parameters matrix over all
+parameters, a gradient vector for scalar `g`, or a function of `θ` returning either) to
+supply them. `names` labels the derived quantities. Step sensitivity is measured over the
+vector of derived quantities in their own units, so compute quantities of very different
+magnitudes separately.
+
+The result is not regular, and [`wald_intervals`](@ref) refuses it, when `estimates` is
+not regular, when a derivative failed, or when a column of `G` changes by more than
+`sensitivity_tol` across step sizes. The normal approximation also fails where
+`∇g(θ̂) = 0`, for example for `g(θ) = θ²` at `θ̂ = 0`; the standard error is then
+(close to) zero and is not flagged.
+
+Only the uncertainty in `θ̂` is propagated. When `g` is itself simulated, for example a
+counterfactual statistic computed on simulated data, the simulation error in `g(θ̂)`
+given `θ̂`, and its correlation with `θ̂` under common draws, are not included, and
+`simulation_covariance` covers only the propagated simulation noise of `θ̂`. Make that
+error small by simulating `g` on many draws.
+"""
+function delta_method(estimates::ParameterCovariance, g; names=nothing, jacobian=nothing, step=nothing,
+                      check_factors=(0.5, 2.0), mapper=map, failure_exceptions=(ModelEvaluationError,),
+                      sensitivity_tol::Real=0.1)
+    θ = estimates.parameters
+    bounds = [(x, x) for x in θ]
+    parameter_names = ["θ$j" for j in eachindex(θ)]
+    for (k, j) in enumerate(estimates.free)
+        bounds[j] = (estimates.lower[k], estimates.upper[k])
+        parameter_names[j] = estimates.names[k]
+    end
+    function derived(x)
+        output = g(x)
+        output isa Real && return [output]
+        output isa AbstractArray{<:Real} && return vec(output)
+        throw(ArgumentError("g must return a real number or a real array"))
+    end
+    value = _try_moments(derived, θ, failure_exceptions)
+    value isa Vector || throw(ArgumentError("g could not be evaluated at the estimate: $value"))
+    labels = _labels(names, length(value), "g", "names")
+    supplied = jacobian === nothing ? nothing :
+        jacobian isa AbstractVecOrMat ? _as_rows(jacobian) : x -> _as_rows(jacobian(x))
+    jac = moment_jacobian(derived, θ, bounds; jacobian=supplied, step=step, check_factors=check_factors,
+                          mapper=mapper, names=parameter_names, failure_exceptions=failure_exceptions)
+    G = jac.jacobian
+    size(G, 1) == length(value) ||
+        throw(ArgumentError("the Jacobian of g must have one row per derived quantity ($(length(value)))"))
+
+    propagate(V) = (P = G * V * G'; (P .+ P') ./ 2)
+    covariance_matrix = propagate(estimates.covariance)
+    sampling = propagate(estimates.sampling_covariance)
+    simulation = estimates.simulation_covariance === nothing ? nothing : propagate(estimates.simulation_covariance)
+    issues = copy(estimates.issues)
+    failed = findall(==(:failed), jac.schemes)
+    isempty(failed) || push!(issues, "the derivative of g with respect to $(join(jac.names[failed], ", ")) failed")
+    for k in findall(>(sensitivity_tol), jac.sensitivity)
+        push!(issues, "the derivative of g with respect to $(jac.names[k]) changes by " *
+                      "$(_short(jac.sensitivity[k])) across step sizes")
+    end
+    standard_errors = sqrt.(max.(diag(covariance_matrix), 0.0))
+    return DerivedCovariance(labels, value, G, copy(estimates.names), copy(estimates.free), covariance_matrix,
+                             standard_errors, sampling, simulation, jac.sensitivity, isempty(issues), issues)
+end
+
+"""
+    wald_intervals(result; z=1.959963984540054) -> Matrix
+
+Symmetric Wald intervals `estimate ± z * standard_errors` as rows `[lower upper]` for a
+[`ParameterCovariance`](@ref) or [`DerivedCovariance`](@ref) (the default `z` gives 95%
+coverage). Throws unless `result.regular`, because rank deficiency, unstable derivatives,
+or a bound invalidates the normal approximation. See [`profile_interval`](@ref) for an
+alternative that does not rely on linearization.
+"""
+function wald_intervals(result::Union{ParameterCovariance,DerivedCovariance}; z::Real=1.959963984540054)
     result.regular || throw(ArgumentError("Wald intervals are not valid here: " * join(result.issues, "; ")))
     return [result.estimate .- z .* result.standard_errors result.estimate .+ z .* result.standard_errors]
 end
@@ -394,15 +565,40 @@ function Base.show(io::IO, ::MIME"text/plain", report::IdentificationReport)
                                               zip(report.names, report.parameter_scales)), ", "))
 end
 
+# Share of each variance due to simulation noise, or `nothing` without a simulation part.
+_simulation_shares(total, simulation) =
+    simulation === nothing ? nothing : [v > 0 ? s / v : NaN for (s, v) in zip(diag(simulation), diag(total))]
+
+function _print_estimates(io, label, names, estimate, standard_errors, shares, extra=nothing)
+    header = [label, "estimate", "std. error"]
+    shares === nothing || push!(header, "simulation share")
+    extra === nothing || push!(header, extra[1])
+    rows = [header]
+    for k in eachindex(names)
+        row = [names[k], _short(estimate[k]), _short(standard_errors[k])]
+        shares === nothing || push!(row, _short(shares[k]))
+        extra === nothing || push!(row, extra[2][k])
+        push!(rows, row)
+    end
+    _print_rows(io, rows)
+end
+
 function Base.show(io::IO, ::MIME"text/plain", result::ParameterCovariance)
     print(io, "ParameterCovariance: rank ", result.rank, " of ", length(result.names), ", ",
           result.regular ? "regular" : "not regular")
-    rows = [["parameter", "estimate", "std. error", "near bound"]]
-    for k in eachindex(result.names)
-        push!(rows, [result.names[k], _short(result.estimate[k]), _short(result.standard_errors[k]),
-                     result.near_bound[k] ? "yes" : ""])
-    end
-    _print_rows(io, rows)
+    _print_estimates(io, "parameter", result.names, result.estimate, result.standard_errors,
+                     _simulation_shares(result.covariance, result.simulation_covariance),
+                     ("near bound", [b ? "yes" : "" for b in result.near_bound]))
+    result.simulation_covariance === nothing &&
+        print(io, "\n  simulation noise was not supplied separately; the moment covariance must include any")
+    isempty(result.issues) || print(io, "\n  issues:\n    ", join(result.issues, "\n    "))
+end
+
+function Base.show(io::IO, ::MIME"text/plain", result::DerivedCovariance)
+    print(io, "DerivedCovariance: ", length(result.names), " derived quantities, ",
+          result.regular ? "regular" : "not regular")
+    _print_estimates(io, "quantity", result.names, result.estimate, result.standard_errors,
+                     _simulation_shares(result.covariance, result.simulation_covariance))
     isempty(result.issues) || print(io, "\n  issues:\n    ", join(result.issues, "\n    "))
 end
 
@@ -412,4 +608,7 @@ Base.show(io::IO, report::IdentificationReport) =
     print(io, "IdentificationReport(rank ", report.rank, " of ", length(report.names), ")")
 Base.show(io::IO, result::ParameterCovariance) =
     print(io, "ParameterCovariance(rank ", result.rank, " of ", length(result.names), ", ",
+          result.regular ? "regular" : "not regular", ")")
+Base.show(io::IO, result::DerivedCovariance) =
+    print(io, "DerivedCovariance(", length(result.names), " quantities, ",
           result.regular ? "regular" : "not regular", ")")

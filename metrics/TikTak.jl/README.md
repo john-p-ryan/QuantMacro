@@ -229,8 +229,12 @@ summary.minima[1].fit             # Targets, model moments, errors, loss contrib
 
 jac = moment_jacobian(criterion, result.x, bounds; names=["rho", "sigma"])
 identification(jac, criterion)    # Singular values and weak parameter combinations
-estimates = parameter_covariance(jac, criterion; covariance=Σ, nobs=N)
+sensitivity = sensitivity_summary(jac, criterion; moment_names=["var", "cov"],
+                                  parameter_scales=[0.1, 0.01])
+display(sensitivity)             # Named moment responses and target sensitivities
+estimates = parameter_covariance(jac, criterion; covariance=Σ, nobs=N, n_simulations=R)
 wald_intervals(estimates)         # Throws if rank deficient or near a bound
+derived = delta_method(estimates, θ -> θ[2]^2 / (1 - θ[1]^2); names=["variance"])
 ```
 
 - `search_summary` groups completed local searches into distinct minima and
@@ -246,10 +250,174 @@ wald_intervals(estimates)         # Throws if rank deficient or near a bound
   `parameter_scales=:raw` or a vector of parameter units for other normalizations.
 - `parameter_covariance` computes the sandwich covariance consistently with the
   objective's `scales` and `weights`. `covariance` is the asymptotic covariance Σ
-  of √N times the raw moment errors, so Σ/`nobs` is their covariance; include
-  simulation noise in Σ.
+  of √N times the raw empirical moment errors, so Σ/`nobs` is their covariance.
+  Simulation noise in the model moments is a separate term; see below.
+- `delta_method` propagates the parameter covariance to derived quantities.
 
 These are local diagnostics: they do not establish global identification.
+Criterion profiles, below, look along one parameter beyond the linearization.
+
+### Sampling and simulation noise
+
+With fixed simulation draws independent of the data, the difference between
+empirical and simulated moments has covariance `Ω = Σ/N + Σₛ/Nₛ`, and the sandwich
+splits accordingly into `estimates.sampling_covariance` and
+`estimates.simulation_covariance`; `display(estimates)` shows the simulation share of
+each variance.
+
+| Keywords | Simulation term |
+| --- | --- |
+| none | No separate term: the moments are computed without simulation noise (for example from a stationary distribution on a grid), or Σ already includes it |
+| `n_simulations=R` | `Σ/(R N)`: moments averaged over R simulated samples with the size and design of the data, so `Ω = (1 + 1/R) Σ/N` |
+| `simulation_covariance=Σₛ, simulation_nobs=Nₛ` | `Σₛ/Nₛ`, for a simulation whose design differs from the data, such as a large stationary population |
+
+`inverse_covariance_weights` and `two_step` take the same keywords, so efficient
+weights and the J statistic use the total `Ω`.
+
+### Derived quantities
+
+`delta_method(estimates, g)` gives standard errors for `g(θ)`, such as elasticities,
+steady-state objects, or counterfactual changes. `g` takes the full parameter vector,
+including fixed parameters, and returns a number or vector; it may solve the model,
+with fixed draws. Derivatives use the finite differences of `moment_jacobian`, within
+the parameter bounds, with the same `step`, `check_factors`, and `mapper` options, or
+pass `jacobian=`. The result keeps the sampling and simulation split, and
+`wald_intervals(derived)` refuses it when the parameter covariance is not regular or
+the derivatives of `g` are unstable across step sizes.
+
+### Criterion profiles
+
+`profile` fixes one parameter on a grid and reoptimizes the others, each grid point in
+its own saved run, warm-started from the estimate and from the neighbouring grid point:
+
+```julia
+estimate = two_step(criterion, bounds; covariance=Σ, nobs=N, n_simulations=R, ...)
+se = parameter_covariance(jac, estimate).standard_errors
+grid = estimate.x[1] .+ se[1] .* (-3:0.5:3)
+p = profile(estimate.objective, bounds, estimate.x, "rho", grid; names=["rho", "sigma"],
+            config=TikTakConfig(n_samples=32, n_local=3),
+            run_dir="model-profiles", problem_id="model-data-draws-v1")
+display(p)                  # Loss and increase over the estimate at each grid value
+profile_interval(p)         # (lower, upper, lower_bounded, upper_bounded, disjoint)
+```
+
+- A flat profile shows weak identification along that parameter, and an asymmetric one
+  shows where the normal approximation fails. A grid point with a lower loss than the
+  estimate is reported in `p.issues`: the estimation search missed the global minimum.
+- `profile_interval` inverts the distance-metric test (Newey and West, 1987): the set of
+  values whose loss increase is at most the χ²₁ critical value (3.84 for 95%). The
+  limit is χ²₁ only for the efficient criterion on the J-statistic scale, such as the
+  second step of `two_step` or unregularized `inverse_covariance_weights`, and only away
+  from bounds. Unlike Wald intervals, it is invariant to reparametrization and can be
+  asymmetric.
+- Grid point `v` of parameter `j` is saved in `run_dir/p<j>_<v>`. With `resume=true`,
+  saved points resume and new ones start, so the grid can be refined later. A changed
+  loss at the same estimate, or changed bounds, settings, targets, or weights, make the
+  resume fail; other model or data changes need a new `problem_id`.
+- Each search drops `target_value`, so it reaches the conditional minimum. Each search
+  uses the workers; grid points run in sequence.
+
+`sensitivity_summary` reports the raw moment Jacobian and the linearized response
+of fitted parameters to empirical moment targets, holding weights and scales
+fixed. If `J` is the raw Jacobian, `D = Diagonal(criterion.scales)`, and
+`G = D⁻¹J`, the response is `K = (G'WG)⁻¹G'WD⁻¹`. A positive `K[k,i]` means
+that increasing target moment `i` raises free parameter `k`; an additive change
+in the model moment has the opposite sign. Full weights retain all cross-moment
+effects, and entries always refer to the original named moments.
+
+```julia
+sensitivity.jacobian                  # moments × free parameters, raw units
+sensitivity.scaled_jacobian           # D⁻¹ J C
+sensitivity.target_sensitivity        # K: free parameters × moments, raw units
+sensitivity.scaled_target_sensitivity # C⁻¹ K D
+Δθ = sensitivity.target_sensitivity * Δtarget
+```
+
+Here `C = Diagonal(sensitivity.parameter_scales)`. The default
+`parameter_scales=:raw` uses one physical unit; supply a positive scalar or vector
+over all parameters for economically meaningful changes, or `:column` for the
+normalization used by `identification`. Fixed parameters are omitted and
+`sensitivity.free` maps rows of `K` back to the original parameters. Reporting
+scales do not change raw `K` or rank. To compare weighting choices, call
+`sensitivity_summary` with the same Jacobian and objectives carrying the
+alternative weights; no model calls or saved-run changes are made.
+
+The calculation uses an SVD with column normalization. Rank deficiency produces
+`NaN` target sensitivities; binding bounds and unstable derivatives set
+`regular=false` and populate `issues`. At bounds, any reported `K` is the
+unconstrained response. Without a moment covariance, proximity to bounds in
+standard-error units is not assessed. This local Gauss–Newton approximation
+gives the exact target derivative for an interior linear model or a nonlinear
+model at an exact fit. With nonzero nonlinear fitting errors, curvature can
+change the derivative after reoptimization. It does not establish convergence,
+goodness of fit, or the sensitivity to changing weights themselves.
+
+## Weighting matrices and two-step estimation
+
+`inverse_covariance_weights` builds a weighting matrix from the moment covariance,
+with the same conventions as `parameter_covariance`: Σ is the asymptotic covariance
+of √N times the raw empirical moment errors, and `n_simulations` or
+`simulation_covariance` with `simulation_nobs` add simulation noise. Pass the result
+as `weights` to any `MomentObjective`:
+
+```julia
+w = inverse_covariance_weights(Σ; nobs=N, moment_names=["var", "cov", "cov2"])
+display(w)                                         # Correlation eigenvalues and weak moment combinations
+efficient = MomentObjective(criterion; weights=w)  # Same model, targets, and scales
+```
+
+The objective converts `w` to its own scale units, `W = D Ω⁻¹ D` with `Ω = Σ/N`
+and `D = Diagonal(scales)`, so the criterion is `(m - target)'Ω⁻¹(m - target)`
+whatever the scales. Its minimum is Hansen's J statistic.
+
+Estimated covariances of many moments are often ill-conditioned, and inverting
+them puts large weight on noisy moment combinations, which biases estimates in
+finite samples (Altonji and Segal, 1996). Regularization shrinks the moment
+correlations towards zero, `Ω_λ = (1-λ)Ω + λ Diagonal(Ω)`, so it does not depend
+on moment units or scales:
+
+| Option | Weights |
+| --- | --- |
+| default | Inverse covariance; throws if the correlation matrix is numerically singular |
+| `shrinkage=λ` | Fixed shrinkage, `0 ≤ λ ≤ 1` |
+| `max_condition=κ` | The smallest λ for which the correlation matrix has condition number at most κ |
+| `diagonal=true` | Inverse variances, stored as a vector so `fit_summary` attributes the loss to each moment |
+
+The report gives the condition number, numerical rank, and eigenvalues of the
+correlation matrix, each with its combination of standardized moments; the error
+for a singular matrix names the redundant combination. With the same Σ and `nobs`,
+`parameter_covariance` gives valid sandwich standard errors under any of these
+weights, and `(G'Ω⁻¹G)⁻¹` without regularization.
+
+`two_step` minimizes the objective with its own weights, then runs a second,
+separately saved search with inverse-covariance weights. The second search's
+starting pool includes the first-step estimate and other first-step minima:
+
+```julia
+estimate = two_step(criterion, bounds; covariance=Σ, nobs=N, n_simulations=R,
+                    weight_options=(; max_condition=1e4), config=config,
+                    run_dir="model-two-step", problem_id="model-data-draws-v1")
+estimate.first.x             # First-step estimate
+estimate.x                   # Second-step estimate
+estimate.j_statistic         # NaN when the weights are regularized
+estimate.degrees_of_freedom  # Moments minus free parameters
+
+jac = moment_jacobian(estimate.objective, estimate.x, bounds)
+parameter_covariance(jac, estimate)  # Second-step objective and moment covariance
+```
+
+- `covariance` and `simulation_covariance` can also be functions `θ -> Σ`, evaluated
+  once at the first-step estimate, for example from moment contributions simulated
+  there. Keep their draws fixed.
+- The steps are saved in `run_dir/step1` and `run_dir/step2-<tag>`, where the tag
+  hashes the second-step weights. `resume=true` resumes both. If the weights change,
+  a new second-step run starts rather than reusing losses from another criterion;
+  only parameter vectors pass between steps.
+- `second_config` defaults to `config` without `target_value`. Second-step losses are
+  on the scale of the J statistic, so adjust `f_tol` and any target. A smaller
+  `n_samples` and `n_local` gives a cheaper refinement.
+- If the first step stops early, `estimate.second === nothing`; increase its budget and resume.
+- A `screen_objective` must be a `MomentObjective`, which is reweighted for the second step.
 
 ## Examples and tests
 
@@ -269,7 +437,11 @@ with worker, budget, and resume options.
 - [solver.jl](src/solver.jl): search configuration, Sobol screening, multistart scheduling, and results.
 - [summaries.jl](src/summaries.jl): moment fit decompositions and distinct local minima of a saved run.
 - [binscatter.jl](src/binscatter.jl): moment-by-parameter bin means and optional Plots.jl panels.
-- [inference.jl](src/inference.jl): moment Jacobians, local identification, and sandwich standard errors.
+- [inference.jl](src/inference.jl): moment Jacobians, local identification, sandwich standard errors with sampling and simulation parts, and the delta method.
+- [sensitivity.jl](src/sensitivity.jl): named local moment responses and weighted moment-to-parameter sensitivities.
+- [weights.jl](src/weights.jl): inverse-covariance weighting matrices, regularization, and conditioning diagnostics.
+- [two_step.jl](src/two_step.jl): two-step estimation with versioned, warm-started second-step runs.
+- [profile.jl](src/profile.jl): criterion profiles in saved, warm-started runs and profile confidence intervals.
 - [objectives.jl](src/objectives.jl): moment-matching criteria, evaluation diagnostics, and model failure types.
 - [transforms.jl](src/transforms.jl): maps bounded, unbounded, and fixed parameters to the unit box.
 - [local.jl](src/local.jl): local optimizer interfaces, built-in methods, and model evaluation handling.

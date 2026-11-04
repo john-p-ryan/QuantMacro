@@ -26,7 +26,10 @@ export minimize, TikTakConfig, TikTakResult, LocalResult, has_solution, load_est
        AbstractExecutor, InlineExecutor, ThreadedExecutor, DistributedExecutor,
        sobol_points,
        moment_jacobian, MomentJacobian, identification, IdentificationReport,
-       parameter_covariance, ParameterCovariance, wald_intervals,
+       sensitivity_summary, SensitivitySummary,
+       parameter_covariance, ParameterCovariance, wald_intervals, delta_method, DerivedCovariance,
+       inverse_covariance_weights, InverseCovarianceWeights, two_step, TwoStepResult,
+       profile, ProfileResult, profile_interval,
        fit_summary, FitSummary, search_summary, SearchSummary, LocalMinimum,
        binscatter, binscatter_data
 
@@ -39,5 +42,9 @@ include("solver.jl")
 include("summaries.jl")
 include("binscatter.jl")
 include("inference.jl")
+include("sensitivity.jl")
+include("weights.jl")
+include("two_step.jl")
+include("profile.jl")
 
 end # module

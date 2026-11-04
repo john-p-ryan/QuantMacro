@@ -37,6 +37,10 @@ end
 _multiply(weights::Vector{Float64}, x) = weights .* x
 _multiply(weights::Matrix{Float64}, x) = weights * x
 
+# Weights given in other units are converted to the criterion's scale units;
+# see `InverseCovarianceWeights`.
+_scaled_weights(weights, scales) = weights
+
 _optional_vector(::Nothing, name) = nothing
 _optional_vector(v::AbstractVector{<:Real}, name) = Vector{Float64}(v)
 _optional_vector(v, name) = throw(ArgumentError("Evaluation.$name must be a real vector"))
@@ -52,16 +56,21 @@ _broadcast_vector(x, default, n, name) = throw(ArgumentError("$name must be a re
 
 """
     MomentObjective(model, target; weights=nothing, scales=nothing)
+    MomentObjective(objective::MomentObjective; weights=objective.weights, scales=objective.scales)
 
 Wrap `model(θ) -> moments` as the minimum-distance criterion
 `r'r` with `r = L * ((moments - target) ./ scales)` and `L'L = W`.
 
 `scales` standardizes moment errors before weighting. `weights` is a
-nonnegative diagonal vector or a symmetric positive-semidefinite matrix.
+nonnegative diagonal vector or a symmetric positive-semidefinite matrix in
+these scale units, or an [`InverseCovarianceWeights`](@ref), which is in raw
+moment units and is converted to `W = D Ω⁻¹ D` with `D = diag(scales)`.
 Identity weights and unit scales are the defaults. No covariance matrix is
-estimated or inverted here. Use fixed simulation draws so that evaluations
+estimated here. Use fixed simulation draws so that evaluations
 are deterministic and cacheable. Calling the objective returns an
 [`Evaluation`](@ref) carrying the moments and residuals.
+
+The second form copies the model and targets of `objective` with new weights or scales.
 """
 struct MomentObjective{M}
     model::M
@@ -79,6 +88,7 @@ function MomentObjective(model, target::AbstractVector{<:Real}; weights=nothing,
     moment_scales = _broadcast_vector(scales, 1.0, n_moments, "scales")
     (all(isfinite, moment_scales) && all(>(0), moment_scales)) ||
         throw(ArgumentError("moment scales must be positive and finite"))
+    weights = _scaled_weights(weights, moment_scales)
     if weights === nothing
         weight_values = ones(n_moments)
         factor = ones(n_moments)
@@ -106,6 +116,9 @@ function MomentObjective(model, target::AbstractVector{<:Real}; weights=nothing,
     end
     return MomentObjective(model, targets, moment_scales, weight_values, factor)
 end
+
+MomentObjective(objective::MomentObjective; weights=objective.weights, scales=objective.scales) =
+    MomentObjective(objective.model, objective.target; weights=weights, scales=scales)
 
 function (objective::MomentObjective)(parameters)
     raw = objective.model(parameters)

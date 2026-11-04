@@ -20,3 +20,12 @@ tools/Spline/Manifest.toml
 
 # Local estimation roadmap
 metrics/TikTak.jl/TODO.md
+
+# lecture slides
+models/agg_uncertainty/slides/
+
+# Problem set and solutions (Hopenhayn-Rogerson SMM)
+models/firm_dynamics/PSHRSMM/
+
+# Krusell-Smith skeleton (teaching version)
+models/agg_uncertainty/KS_skeleton.jl
