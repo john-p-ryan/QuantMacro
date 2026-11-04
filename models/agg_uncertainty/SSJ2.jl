@@ -4,10 +4,12 @@
 using Parameters, LinearAlgebra, SparseArrays, Optim
 using Spline # custom spline package
 
-# Steady state household block. Its idiosyncratic employment state ϵ is stored as z_grid / nz.
-include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
+# Steady state household block, shared with BKM_transition.jl and Reiter.jl (skipped if one of them already loaded it).
+# Its idiosyncratic employment state ϵ is stored as z_grid / nz.
+@isdefined(build_T_star) || include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
 
-# We need the backward_iterate function from your original implementation.
+# One EGM step backward in time: given next period's marginal value of capital ∂V_next = (1 + r' - δ) u'(c'),
+# returns today's policies at prices (r, w) and today's marginal value ∂V
 function backward_iterate(prim_ss::Primitives, ∂V_next, r, w)
     @unpack_Primitives prim_ss 
 
@@ -88,6 +90,8 @@ end
     fast_jacobian(prim_ss, res_ss, dr, dw, T)
 
 Computes the household block Jacobians, J_K_r and J_K_w, using the efficient two-stage method.
+`J_K_r[t, s]` is the response of beginning-of-period capital K_t to the rental rate r_s, for periods 1, ..., T.
+Period 1 is when the shock hits, so K_1 is predetermined at the steady state and the first row is zero.
 """
 function fast_jacobian(prim_ss::Primitives, res_ss::Results, dr::Float64, dw::Float64, T::Int)
     # --- Stage 1: Pre-computation ---
@@ -103,15 +107,25 @@ function fast_jacobian(prim_ss::Primitives, res_ss::Results, dr::Float64, dw::Fl
     μ_ss_vec = vec(res_ss.μ)
     k_hist_rep_vec = vec(repeat(prim_ss.k_hist, 1, prim_ss.nz))
 
+    # Capital along the unshocked path. μ_ss is stationary only up to its solver's tolerance, so differencing against
+    # this path rather than res_ss.K keeps that drift (~1e-8, comparable to the perturbation's effect) out of the Jacobians.
+    K_base = zeros(T)
+    μ_base = μ_ss_vec
+    K_base[1] = k_hist_rep_vec' * μ_base
+    for t in 2:T
+        μ_base = T_ss * μ_base
+        K_base[t] = k_hist_rep_vec' * μ_base
+    end
+
     println("Constructing Jacobians...")
     # Loop over shock time `s` (columns of Jacobians)
     for s in 1:T
+        # μ_1 is the steady state distribution: households cannot react before period 1, when the shock is revealed
         μ_r_vec, μ_w_vec = μ_ss_vec, μ_ss_vec
 
-        # Loop over response time `t` (rows of Jacobians)
-        for t in 1:T
+        # Loop over response time `t` (rows of Jacobians); row 1 stays zero
+        for t in 2:T
             # The distribution at `t` (μ_t) is determined by policy at `t-1`.
-            # Let policy_time = t - 1.
             policy_time = t - 1
 
             # --- Update distribution for the `r` shock ---
@@ -125,7 +139,7 @@ function fast_jacobian(prim_ss::Primitives, res_ss::Results, dr::Float64, dw::Fl
             end
             μ_r_vec = T_r_t * μ_r_vec
             K_r_t = k_hist_rep_vec' * μ_r_vec
-            J_K_r[t, s] = (K_r_t - res_ss.K) / dr
+            J_K_r[t, s] = (K_r_t - K_base[t]) / dr
             
             # --- Update distribution for the `w` shock ---
             local T_w_t
@@ -138,7 +152,7 @@ function fast_jacobian(prim_ss::Primitives, res_ss::Results, dr::Float64, dw::Fl
             end
             μ_w_vec = T_w_t * μ_w_vec
             K_w_t = k_hist_rep_vec' * μ_w_vec
-            J_K_w[t, s] = (K_w_t - res_ss.K) / dw
+            J_K_w[t, s] = (K_w_t - K_base[t]) / dw
         end
     end
     println("Jacobian construction complete.")
@@ -152,7 +166,7 @@ function Firm_Block(prim_ss::Primitives, res_ss::Results, T::Int)
     Z = 1.0 ### Note we are making this assumption at steady state
 
     # Calculate the static Jacobians for the firm block in closed form
-    # we have r = α * Z * K^α * L^(1-α)
+    # we have r = α * Z * K^(α-1) * L^(1-α)
     # and w = (1-α) * Z * K^α * L^(-α)
     dr_dK = α * (α - 1) * Z * K^(α - 2) * L^(1 - α)
     dw_dK = α * (1-α) * Z * K^(α - 1) * L^(-α)
@@ -171,12 +185,9 @@ end
 function solve_dK(ρ, Z_shock, J_K_r, J_K_w, J_r_K, J_w_K, J_r_Z, J_w_Z)
     T = size(J_K_r, 1)
 
-    Z_path = ones(T)
-    Z_path[1] += Z_shock
-    for t in 2:T
-        Z_path[t] = exp(ρ * log(Z_path[t-1]))
-    end
-    dZ = Z_path - ones(T)
+    # First-order TFP path: log Z_t = ρ^(t-1) Z_shock, so dZ_t = Z_shock ρ^(t-1) (as in Reiter's IRFs), which keeps
+    # dK / Z_shock independent of the shock size
+    dZ = Z_shock .* ρ .^ (0:T-1)
 
     # Market clearing Jacobians using Chain Rule
     H_K = J_K_r * J_r_K + J_K_w * J_w_K - I

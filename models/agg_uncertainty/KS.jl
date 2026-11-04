@@ -21,7 +21,7 @@ Table of Contents:
     - 4.3 Solve model
 =#
 
-using Parameters, LinearAlgebra, Random, Interpolations, Optim, Statistics
+using LinearAlgebra, Random, Interpolations, Optim, Statistics
 
 
 
@@ -33,18 +33,17 @@ using Parameters, LinearAlgebra, Random, Interpolations, Optim, Statistics
 
 ######################### Part 1 - setup model #########################
 
-@with_kw struct Primitives
+@kwdef struct Primitives
     β::Float64 = 0.99
     γ::Float64 = 1.0  # coefficient of relative risk aversion (γ = 1 is log utility)
-    @assert γ > 0 "γ must be positive"
     α::Float64 = 0.36
     δ::Float64 = 0.025
     ē::Float64 = 0.3271
 
-    z_grid::Vector{Float64} = [1.01, .99]
-    z_g::Float64 = z_grid[1]
-    z_b::Float64 = z_grid[2]
-    nz::Int64 = length(z_grid)
+    Z_grid::Vector{Float64} = [1.01, .99]
+    Z_g::Float64 = Z_grid[1]
+    Z_b::Float64 = Z_grid[2]
+    nZ::Int64 = length(Z_grid)
 
     ϵ_grid::Vector{Float64} = [1, 0]
     nϵ::Int64 = length(ϵ_grid)
@@ -64,11 +63,11 @@ using Parameters, LinearAlgebra, Random, Interpolations, Optim, Statistics
 end
 
 
-@with_kw mutable struct Results
+mutable struct Results
     Z::Vector{Float64}                      # aggregate shocks
     E::Matrix{Float64}                      # employment shocks
 
-    V::Array{Float64, 4}                    # value function, dims (k, ϵ, K, z)
+    V::Array{Float64, 4}                    # value function, dims (k, ϵ, K, Z)
     k_policy::Array{Float64, 4}             # capital policy, similar to V
 
     a₀::Float64                             # constant for capital LOM, good times
@@ -94,7 +93,7 @@ end
 ######################### Part 2 - generate shocks #########################
 
 
-@with_kw struct Shocks
+@kwdef struct Shocks
     #parameters of transition matrix:
     d_ug::Float64 = 1.5 # Unemp Duration (Good Times)
     u_g::Float64 = 0.04 # Fraction Unemp (Good Times)
@@ -143,19 +142,20 @@ end
     Mgb::Array{Float64,2} = [pbg11 pbg01
                             pbg10 pbg00]
 
-    Mbb ::Array{Float64,2} = [pbb11 pbb01
-                             pbb10 pbb00]
+    Mbb::Array{Float64,2} = [pbb11 pbb01
+                            pbb10 pbb00]
 
-    M::Array{Float64,2} = [pgg*Mgg pgb*Mgb
-                          pbg*Mbg pbb*Mbb]
+    # Joint transition of (Z, ϵ); rows and columns ordered (g, employed), (g, unemployed), (b, employed), (b, unemployed)
+    M::Array{Float64,2} = [pgg*Mgg pbg*Mgb
+                          pgb*Mbg pbb*Mbb]
 
     # aggregate transition matrix
-    Mzz::Array{Float64,2} = [pgg pbg
+    MZZ::Array{Float64,2} = [pgg pbg
                             pgb pbb]
 end
 
 
-@with_kw struct Simulations
+@kwdef struct Simulations
     T::Int64 = 11_000           # number of periods to simulate
     N::Int64 = 5_000            # number of agents to simulate
     seed::Int64 = 1234          # seed for random number generator
@@ -173,7 +173,7 @@ end
 
 
 
-function sim_Markov(current_index::Int64, M::Matrix{Float64})
+function sim_markov(current_index::Int64, M::Matrix{Float64})
     #=
     Simulate the next state index given the current state index and Markov transition matrix
 
@@ -198,7 +198,7 @@ function sim_Markov(current_index::Int64, M::Matrix{Float64})
 end
 
 
-function DrawShocks(prim::Primitives, sho::Shocks, sim::Simulations)
+function draw_shocks(prim::Primitives, sho::Shocks, sim::Simulations)
     #=
     Generate a sequence of aggregate shocks and panel of idiosyncratic shocks
 
@@ -211,19 +211,18 @@ function DrawShocks(prim::Primitives, sho::Shocks, sim::Simulations)
     Z (Vector): vector of aggregate shocks, length T
     E (Matrix): matrix of employment shocks, size N x T
     =#
-    @unpack_Simulations sim
-    @unpack_Primitives prim
+    (; T, N, seed) = sim
     Random.seed!(seed)
 
     Z = zeros(T)
     E = zeros(N, T)
 
     # --- Initialize states for t=1 ---
-    local_z_index = 1 # Start in good state
-    Z[1] = prim.z_grid[local_z_index]
+    local_Z_index = 1 # Start in good state
+    Z[1] = prim.Z_grid[local_Z_index]
 
     local_ϵ_index =  ones(Int64, N)
-    num_unemp = Int64(N * sho.u_g)
+    num_unemp = round(Int64, N * sho.u_g)
     local_ϵ_index[1:num_unemp] .= 2 # Set initial unemployed
     E[:, 1] = [prim.ϵ_grid[i] for i in local_ϵ_index]
 
@@ -231,9 +230,9 @@ function DrawShocks(prim::Primitives, sho::Shocks, sim::Simulations)
     # We generate state for t based on state at t-1
     for t in 2:T
         # 1. Simulate next aggregate state
-        # local_z_index currently holds the state from t-1
-        next_z_index = sim_Markov(local_z_index, sho.Mzz)
-        Z[t] = prim.z_grid[next_z_index]
+        # local_Z_index currently holds the state from t-1
+        next_Z_index = sim_markov(local_Z_index, sho.MZZ)
+        Z[t] = prim.Z_grid[next_Z_index]
 
         # 2. Loop over agents to simulate employment shocks for t
         for n in 1:N
@@ -241,14 +240,14 @@ function DrawShocks(prim::Primitives, sho::Shocks, sim::Simulations)
             current_ϵ_index_n = local_ϵ_index[n] 
             next_ϵ_index_n = 0
 
-            if local_z_index == 1 && next_z_index == 1
-                next_ϵ_index_n = sim_Markov(current_ϵ_index_n, sho.Mgg)
-            elseif local_z_index == 1 && next_z_index == 2
-                next_ϵ_index_n = sim_Markov(current_ϵ_index_n, sho.Mgb)
-            elseif local_z_index == 2 && next_z_index == 1
-                next_ϵ_index_n = sim_Markov(current_ϵ_index_n, sho.Mbg)
-            else # local_z_index == 2 && next_z_index == 2
-                next_ϵ_index_n = sim_Markov(current_ϵ_index_n, sho.Mbb)
+            if local_Z_index == 1 && next_Z_index == 1
+                next_ϵ_index_n = sim_markov(current_ϵ_index_n, sho.Mgg)
+            elseif local_Z_index == 1 && next_Z_index == 2
+                next_ϵ_index_n = sim_markov(current_ϵ_index_n, sho.Mgb)
+            elseif local_Z_index == 2 && next_Z_index == 1
+                next_ϵ_index_n = sim_markov(current_ϵ_index_n, sho.Mbg)
+            else # local_Z_index == 2 && next_Z_index == 2
+                next_ϵ_index_n = sim_markov(current_ϵ_index_n, sho.Mbb)
             end
             
             # Store shock for period t
@@ -258,42 +257,22 @@ function DrawShocks(prim::Primitives, sho::Shocks, sim::Simulations)
         end
 
         # Update aggregate state for next iteration (t+1)
-        local_z_index = next_z_index
+        local_Z_index = next_Z_index
     end
 
     return Z, E
 end
 
 
-function split_kwargs(kwargs, types...)
+function initialize(; prim::Primitives=Primitives(), sho::Shocks=Shocks(), sim::Simulations=Simulations())
     #=
-    Route flat keyword arguments to the parameter structs whose fields they name
-
-    Args
-    kwargs: keyword arguments, e.g. (γ=2.0, u_g=0.05, seed=1)
-    types: parameter struct types, e.g. Primitives, Shocks, Simulations
-
-    Returns
-    Tuple of NamedTuples, one per type, holding the keywords that are fields of that type
+    Draw shocks and allocate the results struct. Pass any parameter struct to override its defaults,
+    e.g. initialize(; prim=Primitives(γ=2.0, nK=20), sim=Simulations(seed=1))
     =#
-    unknown = setdiff(keys(kwargs), fieldnames.(types)...)
-    isempty(unknown) || throw(ArgumentError("unknown parameter(s): $(join(unknown, ", "))"))
-    return map(T -> (; (k => v for (k, v) in pairs(kwargs) if k in fieldnames(T))...), types)
-end
+    Z, E = draw_shocks(prim, sho, sim)
 
-
-function Initialize(; kwargs...)
-    #=
-    Keyword arguments override the defaults of Primitives, Shocks, or Simulations, e.g. Initialize(; γ=2.0, nK=20, seed=1)
-    =#
-    prim_kw, sho_kw, sim_kw = split_kwargs(kwargs, Primitives, Shocks, Simulations)
-    prim = Primitives(; prim_kw...)
-    sho = Shocks(; sho_kw...)
-    sim = Simulations(; sim_kw...)
-    Z, E = DrawShocks(prim, sho, sim)
-
-    V = zeros(prim.nk, prim.nϵ, prim.nK, prim.nz)
-    k_policy = zeros(prim.nk, prim.nϵ, prim.nK, prim.nz)
+    V = zeros(prim.nk, prim.nϵ, prim.nK, prim.nZ)
+    k_policy = zeros(prim.nk, prim.nϵ, prim.nK, prim.nZ)
 
     a₀ = 0.094
     a₁ = 0.965
@@ -359,9 +338,9 @@ function bilinear_interp(F::Array{Float64, 2}, x1::Vector{Float64}, x2::Vector{F
 end
 
 
-function Bellman(prim::Primitives, res::Results, sho::Shocks)
+function bellman(prim::Primitives, res::Results, sho::Shocks)
     #= 
-    Solve the Bellman equation for the household problem. HH state variables are (k, ϵ, K, z).
+    Solve the Bellman equation for the household problem. HH state variables are (k, ϵ, K, Z).
 
     Args
     prim (Primitives): model parameters
@@ -373,12 +352,12 @@ function Bellman(prim::Primitives, res::Results, sho::Shocks)
     k_next (Array): updated capital policy function
     =#
 
-    @unpack_Primitives prim
-    @unpack_Results res
-    @unpack_Shocks sho
+    (; β, γ, α, δ, ē, Z_grid, Z_g, Z_b, nZ, ϵ_grid, nϵ, k_grid, nk, K_grid, nK) = prim
+    (; V, a₀, a₁, b₀, b₁) = res
+    (; u_g, u_b, M) = sho
 
-    V_next = zeros(nk, nϵ, nK, nz)
-    k_next = zeros(nk, nϵ, nK, nz)
+    V_next = zeros(nk, nϵ, nK, nZ)
+    k_next = zeros(nk, nϵ, nK, nZ)
 
     # interpolate value function to solve continuously
     Vg1_interp = bilinear_interp(V[:, 1, :, 1], k_grid, K_grid)
@@ -387,28 +366,24 @@ function Bellman(prim::Primitives, res::Results, sho::Shocks)
     Vb0_interp = bilinear_interp(V[:, 2, :, 2], k_grid, K_grid)
 
     # begin the main loop
-    for (z_index, z) in enumerate(z_grid)
+    for (Z_index, Z) in enumerate(Z_grid)
 
-        # L is determined by z by law of large numbers
-        if z == z_g
+        # L is determined by Z by law of large numbers
+        if Z == Z_g
             L = ē * (1-u_g)
-        elseif z == z_b
+        elseif Z == Z_b
             L = ē * (1-u_b)
         end
             
         for (K_index, K) in enumerate(K_grid)
-            # use LOM to determine K' given K & z
-            if z == z_g
-                K_prime = exp(a₀ + a₁*log(K))
-            elseif z == z_b
-                K_prime = exp(b₀ + b₁*log(K))
-            end
+            # use LOM to determine K' given K & Z (assigned once, so the closure below can capture it without boxing)
+            K_prime = Z == Z_g ? exp(a₀ + a₁*log(K)) : exp(b₀ + b₁*log(K))
 
-            w = (1-α) * z * (K/L) ^ α
-            r = α * z * (L/K) ^ (1-α)
+            w = (1-α) * Z * (K/L) ^ α
+            r = α * Z * (L/K) ^ (1-α)
             
             for (ϵ_index, ϵ) in enumerate(ϵ_grid)
-                M_index = ϵ_index + nϵ*(z_index-1)
+                M_index = ϵ_index + nϵ*(Z_index-1)
                 p = M[M_index, :]
 
                 for (k_index, k) in enumerate(k_grid)
@@ -428,10 +403,10 @@ function Bellman(prim::Primitives, res::Results, sho::Shocks)
                     opt = optimize(obj, 0.0, budget)
 
                     if Optim.converged(opt)
-                        V_next[k_index, ϵ_index, K_index, z_index] = -opt.minimum
-                        k_next[k_index, ϵ_index, K_index, z_index] = opt.minimizer
+                        V_next[k_index, ϵ_index, K_index, Z_index] = -opt.minimum
+                        k_next[k_index, ϵ_index, K_index, Z_index] = opt.minimizer
                     else
-                        print("error at k_index: ", k_index, " ϵ_index: ", ϵ_index, " K_index: ", K_index, " z_index: ", z_index)
+                        print("error at k_index: ", k_index, " ϵ_index: ", ϵ_index, " K_index: ", K_index, " Z_index: ", Z_index)
                         error("Optimization did not converge")
                     end
                 end
@@ -443,7 +418,7 @@ function Bellman(prim::Primitives, res::Results, sho::Shocks)
 end
 
 
-function VFI(prim::Primitives, res::Results, sho::Shocks, sim::Simulations)
+function vfi(prim::Primitives, res::Results, sho::Shocks, sim::Simulations)
     #=
     Iterate on the value function until convergence
 
@@ -457,14 +432,14 @@ function VFI(prim::Primitives, res::Results, sho::Shocks, sim::Simulations)
     res_next (Results): updated results struct
 
     =#
-    @unpack_Simulations sim
+    (; V_tol, V_max_iter) = sim
     res_next = deepcopy(res)
 
     error = 100 * V_tol
     iter = 0
 
     while error > V_tol && iter < V_max_iter
-        V_next, k_next = Bellman(prim, res_next, sho)
+        V_next, k_next = bellman(prim, res_next, sho)
         # relative criterion: for γ > 1, V near c ≈ 0 is so large that an absolute tolerance is below machine precision
         error = maximum(abs.(V_next .- res_next.V) ./ (1 .+ abs.(res_next.V)))
         res_next.V = V_next
@@ -475,9 +450,9 @@ function VFI(prim::Primitives, res::Results, sho::Shocks, sim::Simulations)
     end
 
     if iter == V_max_iter
-        println("Maximum iterations reached in VFI")
+        println("Maximum iterations reached in vfi")
     elseif error < V_tol
-        println("Converged in VFI after $iter iterations")
+        println("Converged in vfi after $iter iterations")
     end
 
     return res_next
@@ -498,7 +473,7 @@ end
 ########################### Part 4 - Solve model ###########################
 
 
-function SimulateCapitalPath(prim::Primitives, res::Results, sim::Simulations)
+function simulate_capital_path(prim::Primitives, res::Results, sim::Simulations)
     #=
     Simulate the path of K on the pseudopanel using interpolated policy functions
 
@@ -511,9 +486,9 @@ function SimulateCapitalPath(prim::Primitives, res::Results, sim::Simulations)
     K_path (Vector): path of capital
     k_panel (Matrix): panel of individual capital holdings
     =#
-    @unpack_Primitives prim 
-    @unpack_Results res
-    @unpack_Simulations sim
+    (; Z_g, Z_b, k_grid, K_grid) = prim
+    (; Z, E, k_policy) = res
+    (; T, N, K_initial) = sim
 
     kpg1_interp = bilinear_interp(k_policy[:, 1, :, 1], k_grid, K_grid)
     kpg0_interp = bilinear_interp(k_policy[:, 2, :, 1], k_grid, K_grid)
@@ -527,15 +502,15 @@ function SimulateCapitalPath(prim::Primitives, res::Results, sim::Simulations)
     K_path = zeros(T)
     K_path[1] = K_initial
 
-    for (t, z) in enumerate(Z[1:end-1])
+    for (t, Z_t) in enumerate(Z[1:end-1])
         for n in 1:N
-            if z == z_g
+            if Z_t == Z_g
                 if E[n, t] == 1
                     k_panel[n, t+1] = kpg1_interp(k_panel[n, t], K_path[t])
                 else
                     k_panel[n, t+1] = kpg0_interp(k_panel[n, t], K_path[t])
                 end
-            elseif z == z_b
+            elseif Z_t == Z_b
                 if E[n, t] == 1
                     k_panel[n, t+1] = kpb1_interp(k_panel[n, t], K_path[t])
                 else
@@ -551,13 +526,14 @@ function SimulateCapitalPath(prim::Primitives, res::Results, sim::Simulations)
 end
 
 
-function EstimateRegression(prim::Primitives, res::Results, sim::Simulations)
+function estimate_regression(prim::Primitives, res::Results, sim::Simulations)
     #=
     Estimate the law of motion for capital using simulated path
 
     Args
     prim (Primitives): model parameters
     res (Results): results struct
+    sim (Simulations): simulation parameters
 
     Returns
     a₀ (Float): constant for capital LOM, good times
@@ -566,14 +542,14 @@ function EstimateRegression(prim::Primitives, res::Results, sim::Simulations)
     b₁ (Float): coefficient for capital LOM, bad times
     R² (Float): R² for capital LOM
     =#
-    @unpack_Simulations sim
+    (; burn) = sim
 
     # trim simulated path for burn-in
     K_lag = res.K_path[burn-1:end-1]
     K_path = res.K_path[burn:end]
     Z = res.Z[burn-1:end-1]
 
-    D = Z .== prim.z_g # dummy variable for good times
+    D = Z .== prim.Z_g # dummy variable for good times
 
     # DGP: log(K_t+1) = D(a₀ + a₁*log(K_t)) + (1-D)(b₀ + b₁*log(K_t)) + ε
 
@@ -593,29 +569,27 @@ function EstimateRegression(prim::Primitives, res::Results, sim::Simulations)
 end
 
 
-function SolveModel(; kwargs...)
+function solve_model(; prim::Primitives=Primitives(), sho::Shocks=Shocks(), sim::Simulations=Simulations())
     #=
     Solve the Krusell-Smith model by iterating on the law of motion for capital
 
     Args
-    kwargs: overrides for any field of Primitives, Shocks, or Simulations, e.g. SolveModel(; γ=2.0, nk=100)
+    prim, sho, sim: parameter structs, e.g. solve_model(; prim=Primitives(γ=2.0, nk=100))
 
     Returns
     prim, sho, sim, res: parameter structs and results struct
     =#
 
-    prim, sho, sim, res = Initialize(; kwargs...)
-    @unpack_Primitives prim
-    @unpack_Shocks sho
-    @unpack_Simulations sim
+    prim, sho, sim, res = initialize(; prim, sho, sim)
+    (; reg_tol, reg_max_iter, λ) = sim
 
     error = 100 * reg_tol
     iter = 0
 
     while error > reg_tol && iter < reg_max_iter
-        res = VFI(prim, res, sho, sim)
-        res.K_path, res.k_panel = SimulateCapitalPath(prim, res, sim)
-        a₀, a₁, b₀, b₁, R² = EstimateRegression(prim, res, sim)
+        res = vfi(prim, res, sho, sim)
+        res.K_path, res.k_panel = simulate_capital_path(prim, res, sim)
+        a₀, a₁, b₀, b₁, R² = estimate_regression(prim, res, sim)
         error = maximum(abs.([a₀ - res.a₀, a₁ - res.a₁, b₀ - res.b₀, b₁ - res.b₁, R² - res.R²]))
         res.a₀ = λ*a₀ + (1-λ)*res.a₀
         res.a₁ = λ*a₁ + (1-λ)*res.a₁
@@ -628,9 +602,9 @@ function SolveModel(; kwargs...)
     end
 
     if iter == reg_max_iter
-        println("Maximum iterations reached in SolveModel")
+        println("Maximum iterations reached in solve_model")
     elseif error < reg_tol
-        println("Converged in SolveModel after $iter iterations")
+        println("Converged in solve_model after $iter iterations")
     end
 
     return prim, sho, sim, res

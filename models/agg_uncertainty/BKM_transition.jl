@@ -2,11 +2,12 @@
 # using the method of Boppart, Krusell, and Mitman (2018).
 
 
-using Parameters, LinearAlgebra, Random, Optim, SparseArrays
+using Parameters, LinearAlgebra, Optim, SparseArrays
 using Spline # custom spline package
 
-# Steady state household block. Its idiosyncratic employment state ϵ is stored as z_grid / nz.
-include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
+# Steady state household block, shared with Reiter.jl and SSJ2.jl (skipped if one of them already loaded it).
+# Its idiosyncratic employment state ϵ is stored as z_grid / nz.
+@isdefined(build_T_star) || include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
 
 @with_kw struct Simulation
     # TFP parameters
@@ -492,13 +493,11 @@ function convolve(irf::Vector{Float64}, innovations::Vector{Float64})
 
     for T_idx in 1:T_len
         current_deviation = 0.0
-        for s in 1:T_idx
+        # only innovations within the IRF's horizon of T_idx contribute
+        for s in max(1, T_idx - irf_len + 1):T_idx
             # Effect of innovation at time `s` on the aggregate at time `T_idx`.
             # The time lag is `T_idx - s`. The corresponding IRF index is `T_idx - s + 1`.
-            irf_idx = T_idx - s + 1
-            if irf_idx <= irf_len
-                current_deviation += irf[irf_idx] * innovations[s]
-            end
+            current_deviation += irf[T_idx - s + 1] * innovations[s]
         end
         deviation_path[T_idx] = current_deviation
     end
@@ -507,25 +506,30 @@ end
 
 
 
-function simulate_economy(Z_path::Vector{Float64}, irfs, res_ss::Results, prim::Primitives, sim::Simulation; use_levels::Bool=false)
+# Simulates the linearized economy along Z_path by convolving the IRFs with the TFP innovations. By default TFP is an
+# AR(1) in log Z with mean log Z = 0. With tfp_levels = true it is an AR(1) in Z with mean Z = 1, e.g. a symmetric
+# two-state chain with states 1 ± Δ: its log Z has mean (1/2) log(1 - Δ²) < 0, so innovations backed out in logs would
+# not have mean zero. The IRFs apply to shocks in either Z or log Z, since dZ = d log Z at Z = 1.
+function simulate_economy(Z_path::Vector{Float64}, irfs, res_ss::Results, prim::Primitives, sim::Simulation;
+                          use_levels::Bool=false, tfp_levels::Bool=false)
     @unpack_Primitives prim
     @unpack_Results res_ss
     @unpack_Simulation sim
     T_sim = length(Z_path)
-    
-    # --- Step 1: Back out the sequence of TFP innovations from the TFP path ---
-    log_Z_path = log.(Z_path)
+
+    # --- Step 1: Back out the sequence of TFP innovations from the TFP path, in log Z or in Z - 1 ---
+    x = tfp_levels ? Z_path .- 1.0 : log.(Z_path)
     innovations = zeros(T_sim)
-    innovations[1] = log_Z_path[1] 
+    innovations[1] = x[1]
 
     for t in 2:T_sim
-        innovations[t] = log_Z_path[t] - ρ * log_Z_path[t-1]
+        innovations[t] = x[t] - ρ * x[t-1]
     end
 
     # --- Step 2: Convolve IRFs with shocks ---
     if use_levels
-        # For level IRFs: convolve directly with log innovations (mean-zero!)
-        # No conversion to level shocks - this avoids Jensen's inequality bias
+        # For level IRFs: convolve directly with the innovations, which have mean zero
+        # No conversion between log and level shocks - this avoids Jensen's inequality bias
         K_dev_path = convolve(irfs.K, innovations)
         K_var_dev_path = convolve(irfs.K_var, innovations)
         K_cv_dev_path = convolve(irfs.K_cv, innovations)
@@ -547,8 +551,8 @@ function simulate_economy(Z_path::Vector{Float64}, irfs, res_ss::Results, prim::
         r_sim_path = r .+ r_dev_path
         w_sim_path = w .+ w_dev_path
     else
-        # For percent deviations: convert to level shocks first
-        level_shock_series = exp.(innovations) .- 1.0
+        # For percent deviations: convert to level shocks first (with tfp_levels they already are)
+        level_shock_series = tfp_levels ? innovations : exp.(innovations) .- 1.0
         
         K_dev_path = convolve(irfs.K, level_shock_series)
         K_var_dev_path = convolve(irfs.K_var, level_shock_series)

@@ -1,7 +1,12 @@
 # this file contains the functions to linearize Aiyagari model around the steady state
 # using Reiter's method. The linearized system is then solved using the SGU method.
 
-using ForwardDiff
+using Parameters, LinearAlgebra, Optim, SparseArrays, ForwardDiff
+using Spline # custom spline package
+
+# Steady state household block, shared with BKM_transition.jl and SSJ2.jl (skipped if one of them already loaded it).
+# Its idiosyncratic employment state ϵ is stored as z_grid / nz.
+@isdefined(build_T_star) || include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
 
 # Function to create arrays that can store dual numbers if needed
 function create_dual_compatible_array(T, dims...)
@@ -207,9 +212,10 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         # Compute interpolated policy on histogram grid
         k_pol_hist_t = create_dual_compatible_array(T, n_hist, nz)
         for ϵ_index in 1:nz
+            k_spline = safe_pchip(k_grid, k_policy_t[:, ϵ_index])  # fit once, evaluate at every histogram point
             for k_hist_index in 1:n_hist
                 k_val = k_hist[k_hist_index]
-                k_pol_hist_t[k_hist_index, ϵ_index] = safe_pchip(k_grid, k_policy_t[:, ϵ_index], k_val)
+                k_pol_hist_t[k_hist_index, ϵ_index] = k_spline(k_val)
                 
                 # Enforce borrowing constraint on histogram grid
                 if k_pol_hist_t[k_hist_index, ϵ_index] < k_min
@@ -256,6 +262,7 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
         
         # Household optimization with smooth transition between regimes
         euler_errors = create_dual_compatible_array(T, nk, nz)
+        c_splines′ = [safe_pchip(k_grid, c_policy_t′[:, ϵ′_index]) for ϵ′_index in 1:nz]
         for ϵ_index in 1:nz
             for k_index in 1:nk
                 c_current = c_policy_t[k_index, ϵ_index]
@@ -269,7 +276,7 @@ function construct_reiter_system(prim, res_ss; ρ=0.75, σ=0.00661)
                 expected_muc = zero(T)
                 for ϵ′_index in 1:nz
                     # Interpolate consumption given k_next
-                    c_next = safe_pchip(k_grid, c_policy_t′[:, ϵ′_index], k_next)
+                    c_next = c_splines′[ϵ′_index](k_next)
                     
                     # CRRA marginal utility, MU = c^(-γ)
                     muc_next = u_prime(c_next, γ)

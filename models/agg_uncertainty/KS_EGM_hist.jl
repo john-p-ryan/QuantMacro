@@ -6,11 +6,10 @@ Young's histogram method for distributional estimates.
 =#
 
 # import packages and usefull functions
-using Parameters, LinearAlgebra, Random, Statistics, StatsBase, Interpolations
-using Base.Threads # for parallelization via multi-threading
-
+using Parameters, Random, Statistics
 using Spline # custom spline package
 
+# Steady state without aggregate risk, used for the initial distribution
 module Aiyagari
     using Parameters, LinearAlgebra, Optim, SparseArrays, Spline
     include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
@@ -91,6 +90,7 @@ end
     reg_tol::Float64 = 1e-8
     reg_max_iter::Int64 = 250
     λ::Float64 = 0.382
+    threaded::Bool = true  # EGM step across Julia's threads; false runs it serially, e.g. to time methods on one core
 end
 
 # CRRA marginal utility c^(-γ); γ = 1 is log utility
@@ -104,6 +104,18 @@ end
 
 function u_prime_inv(mu, γ)
     return γ == 1 ? 1 / mu : mu^(-1 / γ)
+end
+
+# foreach(f, xs), with the elements split across Julia's threads when threaded is true
+function threaded_foreach(f, xs; threaded::Bool=true)
+    if threaded
+        Threads.@threads for x in xs
+            f(x)
+        end
+    else
+        foreach(f, xs)
+    end
+    return nothing
 end
 
 
@@ -167,10 +179,14 @@ function Initialize(; kwargs...)
         end
     end
 
+    # Initial law of motion: persistence 0.96 in both states, with its fixed point at the Aiyagari steady state
+    a₁ = b₁ = 0.96
+    a₀ = b₀ = (1 - a₁) * log(initial_K)
+
     res = Results(
         k_policy = k_policy_init,
         c_policy = c_policy_init,
-        a₀ = 0.085, a₁ = 0.96, b₀ = 0.085, b₁ = 0.96, R² = 0.0,
+        a₀ = a₀, a₁ = a₁, b₀ = b₀, b₁ = b₁, R² = 0.0,
         Z_sim_path = zeros(sim.T),
         K_sim_path = zeros(sim.T),
         C_sim_path = zeros(sim.T),
@@ -184,79 +200,68 @@ function Initialize(; kwargs...)
 end
 
 
-function Bellman_EGM(prim::Primitives, res::Results)
+function Bellman_EGM(prim::Primitives, res::Results; threaded::Bool=true)
     @unpack_Primitives prim
     @unpack_Results res
 
     k_policy_next = similar(k_policy)
     c_policy_next = similar(c_policy)
 
-    # Create 2D interpolants for c(k,K) for each future shock state (z', ϵ')
-    #c_policy_itps = [
-    #    linear_interpolation((k_grid, K_grid), c_policy[:, ϵ_prime_idx, :, z_prime_idx], extrapolation_bc=Line())
-    #    for ϵ_prime_idx in 1:nϵ, z_prime_idx in 1:nz
-    #]
+    # Create 2D interpolants for c(k,K) for each future shock state (ϵ', z')
     c_policy_itps = [
         BilinearSpline(k_grid, K_grid, c_policy[:, ϵ_prime_idx, :, z_prime_idx]; bc_type="constant")
         for ϵ_prime_idx in eachindex(ϵ_grid), z_prime_idx in eachindex(z_grid)
     ]
 
-    # EGM is parallelizable over today's exogenous states
-    Threads.@threads for z_idx in eachindex(z_grid)
+    # EGM is parallelizable over today's aggregate states
+    threaded_foreach(CartesianIndices((nz, nK)); threaded) do zK
+        z_idx, K_idx = Tuple(zK)
         z = z_grid[z_idx]
+        K = K_grid[K_idx]
 
-        for (K_idx, K) in enumerate(K_grid)
+        # Get tomorrow's aggregate capital from the LOM
+        K_prime = z == z_g ? exp(a₀ + a₁ * log(K)) : exp(b₀ + b₁ * log(K))
+        K_prime = clamp(K_prime, K_min, K_max)
 
-            # Get tomorrow's aggregate capital from the LOM
-            K_prime = if z == z_g
-                exp(a₀ + a₁ * log(K))
-            else
-                exp(b₀ + b₁ * log(K))
+        # Get today's prices
+        w = (1 - α) * z * (K / L)^α
+        r = α * z * (L / K)^(1 - α)
+
+        # Discounted marginal utility β (1 + r' - δ) u'(c') at every k' on the grid, for each future state (ϵ', z')
+        K_prime_vec = fill(K_prime, nk)
+        discounted_MU = [
+            β * (1 + α * z_grid[z_prime_idx] * (L / K_prime)^(1 - α) - δ) .*
+                u_prime.(evaluate_spline(c_policy_itps[ϵ_prime_idx, z_prime_idx], k_grid, K_prime_vec), γ)
+            for ϵ_prime_idx in eachindex(ϵ_grid), z_prime_idx in eachindex(z_grid)
+        ]
+
+        for (ϵ_idx, ϵ) in enumerate(ϵ_grid)
+            # 1. Calculate Expected Marginal Utility for each k' choice
+            Euler_RHS = zeros(nk)
+            for z_prime_idx in eachindex(z_grid), ϵ_prime_idx in eachindex(ϵ_grid)
+                Euler_RHS .+= (Mzz[z_idx, z_prime_idx] * M_unemp[ϵ_idx, ϵ_prime_idx]) .* discounted_MU[ϵ_prime_idx, z_prime_idx]
             end
-            K_prime = clamp(K_prime, K_min, K_max)
 
-            # Get today's prices
-            w = (1 - α) * z * (K / L)^α
-            r = α * z * (L / K)^(1 - α)
+            # 2. Invert Euler to get today's consumption (off-grid)
+            c_today_endog = u_prime_inv.(Euler_RHS, γ)
 
-            for (ϵ_idx, ϵ) in enumerate(ϵ_grid)
-                # 1. Calculate Expected Marginal Utility for each k' choice
-                Euler_RHS = zeros(nk)
-                for (k_prime_idx, k_prime) in enumerate(k_grid)
-                    RHS_sum = 0.0
-                    for (z_prime_idx, z_prime) in enumerate(z_grid)
-                        prob_z_trans = Mzz[z_idx, z_prime_idx]
-                        r_next = α * z_prime * (L / K_prime) ^ (1-α)
-                        for (ϵ_prime_idx, ϵ_prime) in enumerate(ϵ_grid)
-                            prob_ϵ_trans = M_unemp[ϵ_idx, ϵ_prime_idx]
-                            c_prime = evaluate_spline(c_policy_itps[ϵ_prime_idx, z_prime_idx],[k_prime], [K_prime])
-                            RHS_sum += β * (1+r_next-δ) * prob_z_trans * prob_ϵ_trans * u_prime(c_prime[1], γ)
-                        end
-                    end
-                    Euler_RHS[k_prime_idx] = RHS_sum
-                end
+            # 3. Use budget constraint to get today's asset grid (endogenous)
+            k_today_endog = (c_today_endog .+ k_grid .- w * ē * ϵ) ./ (1 + r - δ)
 
-                # 2. Invert Euler to get today's consumption (off-grid)
-                c_today_endog = u_prime_inv.(Euler_RHS, γ)
+            # 4. Interpolate to get consumption policy back on the fixed grid
+            c_spline = PchipSpline(k_today_endog, c_today_endog)
+            c_on_grid = evaluate_spline(c_spline, k_grid)
+            c_policy_next[:, ϵ_idx, K_idx, z_idx] = c_on_grid
 
-                # 3. Use budget constraint to get today's asset grid (endogenous)
-                k_today_endog = (c_today_endog .+ k_grid .- w * ē * ϵ) ./ (1 + r - δ)
+            # 5. Get capital policy from budget constraint
+            budget = (1 + r - δ) .* k_grid .+ w * ē * ϵ
+            k_on_grid = budget .- c_on_grid
 
-                # 4. Interpolate to get consumption policy back on the fixed grid
-                c_spline = PchipSpline(k_today_endog, c_today_endog)
-                c_on_grid = evaluate_spline(c_spline, k_grid)
-                c_policy_next[:, ϵ_idx, K_idx, z_idx] = c_on_grid
-
-                # 5. Get capital policy from budget constraint
-                budget = (1 + r - δ) .* k_grid .+ w * ē * ϵ
-                k_on_grid = budget .- c_on_grid
-                
-                # 6. Enforce borrowing constraint
-                binding_indices = (k_on_grid .< k_min)
-                k_on_grid[binding_indices] .= k_min
-                c_policy_next[binding_indices, ϵ_idx, K_idx, z_idx] = budget[binding_indices] .- k_min
-                k_policy_next[:, ϵ_idx, K_idx, z_idx] = k_on_grid
-            end
+            # 6. Enforce borrowing constraint
+            binding_indices = (k_on_grid .< k_min)
+            k_on_grid[binding_indices] .= k_min
+            c_policy_next[binding_indices, ϵ_idx, K_idx, z_idx] = budget[binding_indices] .- k_min
+            k_policy_next[:, ϵ_idx, K_idx, z_idx] = k_on_grid
         end
     end
     return k_policy_next, c_policy_next
@@ -269,7 +274,7 @@ function Policy_Iteration_EGM(prim::Primitives, res::Results, sim::Simulations)
 
     println("Starting KS Policy Function Iteration with EGM...")
     while error > sim.policy_tol && iter < sim.policy_max_iter
-        k_next, c_next = Bellman_EGM(prim, res_next)
+        k_next, c_next = Bellman_EGM(prim, res_next; sim.threaded)
         error = maximum(abs.(c_next - res_next.c_policy))
         res_next.k_policy, res_next.c_policy = k_next, c_next
         iter += 1
@@ -337,10 +342,11 @@ function SimulateDistributionPath(prim::Primitives, res::Results, sim::Simulatio
         _K_var_sim_path[t] = sum(μ_t .* (k_hist_grid .- K_t).^2)
 
         # Aggregate Consumption
+        K_t_vec = fill(K_t, n_hist)
         c_pol_hist_t = zeros(n_hist, nϵ)
         for ϵ_idx in 1:nϵ
             # Evaluate the consumption policy for (K_t, z_idx) on the k_hist_grid
-            c_pol_hist_t[:, ϵ_idx] = evaluate_spline(c_policy_itps[ϵ_idx, z_idx], k_hist_grid, fill(K_t, n_hist))
+            c_pol_hist_t[:, ϵ_idx] = evaluate_spline(c_policy_itps[ϵ_idx, z_idx], k_hist_grid, K_t_vec)
         end
         _C_sim_path[t] = sum(μ_t .* c_pol_hist_t)
 
@@ -352,16 +358,17 @@ function SimulateDistributionPath(prim::Primitives, res::Results, sim::Simulatio
         # --- Evolve distribution to t+1 ---
         if t < T
             μ_next = zeros(n_hist, nϵ)
-            
+
+            # Capital policy for (K_t, z_idx) on the k_hist_grid
+            k_pol_hist_t = clamp.(reduce(hcat, [evaluate_spline(k_policy_itps[ϵ_idx, z_idx], k_hist_grid, K_t_vec)
+                                                for ϵ_idx in 1:nϵ]), k_hist_min, k_hist_max)
+
             # Iterate over today's states (k, ϵ)
             for ϵ_idx in 1:nϵ, k_idx in 1:n_hist
                 mass = μ_t[k_idx, ϵ_idx]
                 if mass < 1e-12; continue; end
-                
-                k_today = k_hist_grid[k_idx]
 
-                k_prime = evaluate_spline(k_policy_itps[ϵ_idx, z_idx], [k_today], [K_t])[1]
-                k_prime = clamp(k_prime, k_hist_min, k_hist_max)
+                k_prime = k_pol_hist_t[k_idx, ϵ_idx]
 
                 j_high = searchsortedfirst(k_hist_grid, k_prime)
 
@@ -420,8 +427,10 @@ function EstimateRegression(prim::Primitives, K_path::Vector{Float64}, Z_path::V
 end
 
 # Keyword arguments override the Primitives or Simulations defaults, e.g. SolveModel(; z_grid=[1.02, 0.98], γ=2.0)
-function SolveModel(; kwargs...)
-    prim, sim, res, initial_μ = Initialize(; kwargs...)
+SolveModel(; kwargs...) = SolveModel(Initialize(; kwargs...)...)
+
+# Solves from the output of Initialize, e.g. to time the solution apart from the steady state that initializes it
+function SolveModel(prim::Primitives, sim::Simulations, res::Results, initial_μ::Matrix{Float64})
     @unpack_Simulations sim
 
     lom_error = 100.0
@@ -451,7 +460,7 @@ function SolveModel(; kwargs...)
     end
 
     if lom_iter == sim.reg_max_iter
-        println("\nWARNING: Max iterations ($sim.reg_max_iter) reached in LOM loop.")
+        println("\nWARNING: Max iterations ($(sim.reg_max_iter)) reached in LOM loop.")
     else
         println("\nConverged in LOM loop after $lom_iter iterations.")
     end
@@ -472,9 +481,15 @@ end
 """
     estimate_impulse_response(prim, res, sim; num_simulations=1000, max_horizon=50)
 
-Estimates the impulse response of aggregate capital (K) and TFP (z) to a 
-one-period positive TFP shock. The system starts in its long-run steady state, 
-is hit by a good shock in period 1, and then evolves stochastically.
+Estimates the generalized impulse response of aggregate capital (K) to a positive TFP shock, using the
+law of motion for capital. Each simulation starts capital at its long-run mean and draws two TFP paths
+from the same random numbers: one in the good state in period 1, one in the bad state. Without the shock,
+z in period 1 would be drawn from the stationary distribution, so the response is the good path minus that
+mixture, π_b (K_good - K_bad), where π_b is the stationary probability of the bad state. It is the response
+to raising z from its unconditional mean to z_g. Comparing against the no-shock baseline, rather than
+against the long-run mean, removes the drift that capital has from its starting point regardless of the
+shock. With common random numbers the two TFP paths merge once they reach the same state, which reduces
+sampling noise.
 
 # Args
 - `prim` (Primitives): The Primitives struct from the model solution.
@@ -484,9 +499,10 @@ is hit by a good shock in period 1, and then evolves stochastically.
 - `max_horizon` (Int): The maximum number of periods to simulate for the IRF.
 
 # Returns
-- `Tuple{Vector{Float64}, Vector{Float64}}`: 
-    1. The impulse response of K, as a deviation from its steady state (K_t - K_bar).
-    2. The impulse response of z, showing its average path (z_t).
+- `Tuple{Vector{Float64}, Vector{Float64}}`:
+    1. The impulse response of K, as a deviation from the path without the shock. Element t is the
+       capital chosen in period t, K_{t+1}; capital in period 1 is predetermined.
+    2. The average path of z after a good shock in period 1 (z_t).
 """
 function estimate_impulse_response(
     prim::Primitives,
@@ -495,63 +511,33 @@ function estimate_impulse_response(
     num_simulations::Int = 1000,
     max_horizon::Int = 50
     )
-    
-    # --- 1. Extract parameters from model structs ---
+
     @unpack a₀, a₁, b₀, b₁ = res
     @unpack z_g, z_b, Mzz = prim
-    p_persistence = Mzz[1, 1] # Persistence probability of the good state
+    lom(K, good) = good ? exp(a₀ + a₁ * log(K)) : exp(b₀ + b₁ * log(K))
+    π_b = Mzz[1, 2] / (Mzz[1, 2] + Mzz[2, 1]) # stationary probability of the bad state
 
-    # Calculate the steady-state K from the simulation results
+    # Start each simulation at the long-run mean of capital from the simulation results
     K_bar = mean(res.K_sim_path[(sim.burn+1):end])
 
-    # --- 2. Initialize storage arrays ---
-    # Store the deviation of K from its steady state
-    all_K_paths_dev = zeros(num_simulations, max_horizon)
-    # Store the path of the TFP shock z
-    all_z_paths = zeros(num_simulations, max_horizon)
-
-    # --- 3. Run simulations ---
-    for i in 1:num_simulations
-        # Start each simulation at the steady-state level of capital
-        K = K_bar
-        
-        # In period t=1, the economy is hit by a good shock (z_is_good = true)
-        # From t=2 onwards, the shock z evolves stochastically.
-        z_is_good = true
+    irf_K = zeros(max_horizon)
+    irf_z = zeros(max_horizon)
+    for _ in 1:num_simulations
+        K_good, K_bad = K_bar, K_bar
+        good_g, good_b = true, false # state of z on the path after a good / bad shock
 
         for t in 1:max_horizon
-            # Determine the current z value and store its path
-            current_z = z_is_good ? z_g : z_b
-            all_z_paths[i, t] = current_z
-            
-            # Calculate the next value of K using the law of motion for log(K)
-            log_K = log(K)
-            log_K_next = if z_is_good
-                a₀ + a₁ * log_K
-            else # z is bad
-                b₀ + b₁ * log_K
-            end
-            K_next = exp(log_K_next)
-            
-            # Store the deviation of K from the long-run average
-            all_K_paths_dev[i, t] = K_next - K_bar
-            
-            # Update K for the next period
-            K = K_next
-            
-            # Determine the state z for the next period based on persistence p
-            if rand() > p_persistence
-                z_is_good = !z_is_good 
-            end
+            irf_z[t] += good_g ? z_g : z_b
+            K_good, K_bad = lom(K_good, good_g), lom(K_bad, good_b)
+            irf_K[t] += π_b * (K_good - K_bad)
+
+            # Next period's state is good when a shared uniform draw is below the probability of moving to it
+            draw = rand()
+            good_g, good_b = draw < Mzz[good_g ? 1 : 2, 1], draw < Mzz[good_b ? 1 : 2, 1]
         end
     end
 
-    # --- 4. Average across simulations to get the IRFs ---
-    # mean(..., dims=1) returns a 1xT RowVector, so vec() converts it to a T-element Vector.
-    irf_K_deviation = vec(mean(all_K_paths_dev, dims=1))
-    irf_z = vec(mean(all_z_paths, dims=1))
-    
-    return irf_K_deviation, irf_z
+    return irf_K ./ num_simulations, irf_z ./ num_simulations
 end
 
 

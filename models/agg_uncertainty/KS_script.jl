@@ -7,7 +7,7 @@ module KSModule
     include("KS.jl")
 end
 
-using Plots, LinearAlgebra,  Parameters, Statistics
+using Plots, LinearAlgebra, Statistics
 
 
 # Solve the Aiyagari model
@@ -24,8 +24,8 @@ plot(prim_Aiyagari.k_grid, sum(res_Aiyagari.μ, dims=2), xlabel="k", ylabel="Den
 res_Aiyagari.K
 
 function compute_moments_aiyagari(prim, res)
-    @unpack k_grid, z_grid, ē, nz, nk, α, δ, L = prim
-    @unpack w, μ, K, r = res
+    (; k_grid, z_grid, ē, nz, nk, α, δ, L) = prim
+    (; w, μ, K, r) = res
 
 
     # Create vectors for all (k, z) combinations
@@ -67,7 +67,7 @@ println("CV of income: ", cv_income_aiyagari)
 
 
 # Solve the Krusell-Smith model
-@time prim_KS, sho_KS, sim_KS, res_KS = KSModule.SolveModel()
+@time prim_KS, sho_KS, sim_KS, res_KS = KSModule.solve_model()
 
 
 using Interpolations
@@ -77,7 +77,7 @@ pol_interp = scale(pol_interp,
                    range(prim_KS.k_min, prim_KS.k_max, prim_KS.nk), 
                    1:prim_KS.nϵ, 
                    range(prim_KS.K_min, prim_KS.K_max, prim_KS.nK), 
-                   1:prim_KS.nz)
+                   1:prim_KS.nZ)
 
 plot(prim_KS.k_grid, pol_interp(prim_KS.k_grid, 1, 11.62, 1), label="Employed, good times", xlabel="k", ylabel="k'", title="Capital Policy Function")
 plot!(prim_KS.k_grid, pol_interp(prim_KS.k_grid, 2, 11.62, 1), label="Unemployed, good times")
@@ -93,8 +93,8 @@ println("Expected capital: ", sum(res_KS.K_path[1000:end]) / length(res_KS.K_pat
 # income and wealth CV in Krusell-Smith
 
 function compute_panel_moments(prim, res, sim, sho)
-    @unpack z_g, z_b, ē, α, δ = prim
-    @unpack burn = sim
+    (; Z_g, Z_b, ē, α, δ) = prim
+    (; burn) = sim
     
     # Use data after burn-in period
     k_data = res.k_panel[:, burn:end]
@@ -112,14 +112,14 @@ function compute_panel_moments(prim, res, sim, sho)
     
     for t in 1:T_sim
         # Compute aggregate labor
-        if Z_data[t] == z_g
+        if Z_data[t] == Z_g
             L = ē * (1 - sho.u_g)
         else
             L = ē * (1 - sho.u_b)
         end
         
-        # Compute prices for this period
-        r = α * Z_data[t] * (L / K_data[t])^(1 - α) - δ
+        # Compute prices for this period (r is the rental rate, as in the Aiyagari moments above)
+        r = α * Z_data[t] * (L / K_data[t])^(1 - α)
         w = (1 - α) * Z_data[t] * (K_data[t] / L)^α
         
         r_vec[t] = r
@@ -200,18 +200,18 @@ plot(p1, p2, p3, layout=(1,3), size=(1200, 400))
 
 # 3. Compare wealth dispersion in good vs bad aggregate states
 Z_data = res_KS.Z[sim_KS.burn:end]
-good_times = Z_data .== prim_KS.z_g
-bad_times = Z_data .== prim_KS.z_b
+good_times = Z_data .== prim_KS.Z_g
+bad_times = Z_data .== prim_KS.Z_b
 
 println("\n=== Wealth Dispersion by Aggregate State ===")
-println("Good times (high z):")
+println("Good times (high Z):")
 println("  Mean K: ", mean(K_data[good_times]))
 println("  Mean r: ", mean(r_KS[good_times]))
 println("  Mean w: ", mean(w_KS[good_times]))
 println("  Mean Var(wealth): ", mean(var_wealth_KS[good_times]))
 println("  Mean CV(wealth): ", mean(cv_wealth_KS[good_times]))
 
-println("\nBad times (low z):")
+println("\nBad times (low Z):")
 println("  Mean K: ", mean(K_data[bad_times]))
 println("  Mean r: ", mean(r_KS[bad_times]))
 println("  Mean w: ", mean(w_KS[bad_times]))
@@ -220,7 +220,7 @@ println("  Mean CV(wealth): ", mean(cv_wealth_KS[bad_times]))
 
 # 4. Differential impact on rich vs poor
 function wealth_by_quintile(prim, res, sim)
-    @unpack burn = sim
+    (; burn) = sim
     k_data = res.k_panel[:, burn:end]
     T_sim = size(k_data, 2)
     

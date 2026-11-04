@@ -25,9 +25,10 @@
 
 
 
-using Plots, Parameters, Statistics, BenchmarkTools, Printf, Random, ForwardDiff
+using Plots, Parameters, Statistics, Printf, Random, ForwardDiff
 using LinearAlgebra, Optim, SparseArrays
 using Spline # custom spline package
+# Steady state shared by BKM, Reiter, and SSJ (each of their files skips this include once it is loaded)
 include(joinpath(@__DIR__, "..", "incomplete_markets", "Aiyagari_EGM.jl"))
 
 # Load modules for each method
@@ -262,54 +263,8 @@ function main()
 
 
     # --- Part 3: Analysis with Scaled-Up Shocks ---
-    #=
+    # The linear methods are not re-solved: their normalized IRFs do not depend on the shock size.
     println("\n--- Part 3: Analysis with Scaled-Up Shocks ---")
-    for shock_scaled in shock_sizes[2:end]
-        println("\n>>> Processing for a $(shock_scaled*100)% TFP shock...")
-
-        # --- Re-solve for the new shock size ---
-        # KS (requires full re-solve as it is a non-linear method)
-        println("Re-solving with Krusell-Smith...")
-        prim_ks_scaled, sim_ks_scaled, res_ks_scaled = KS.SolveModel(; z_grid=[1.0+shock_scaled, 1.0-shock_scaled], K_min=11.62 - 25*shock_scaled, K_max=11.62 + 25*shock_scaled);
-        irf_ks_dev_scaled, _ = KS.estimate_impulse_response(prim_ks_scaled, res_ks_scaled, sim_ks_scaled, num_simulations=10000, max_horizon=T_irf)
-        K_bar_ks_scaled = mean(res_ks_scaled.K_sim_path[(sim_ks_scaled.burn+1):end])
-        irf_ks_scaled = vcat(0.0, (irf_ks_dev_scaled ./ K_bar_ks_scaled) .* (1 / shock_scaled))[1:T_irf+1]
-
-        # BKM - NOTE: We DO NOT re-solve for a larger shock.
-        # The essence of linearization is that the normalized IRF is independent of the shock size.
-        # We will use the baseline IRF (`irfs_bkm`) computed from the 1% shock for all comparisons.
-        println("For BKM, using baseline IRFs (linearization assumption)...")
-        # The IRFs are already stored in the `irfs_bkm` variable from Part 1.
-        # The original lines that re-solved the model are removed.
-
-
-        # 2. Simulate the BKM economy using the full, high-volatility TFP path.
-        #    We now use the baseline `irfs_bkm` and `sim_bkm` from the 1% shock solution.
-        sim_path_bkm_full_scaled = simulate_economy(res_ks_scaled.Z_sim_path, irfs_bkm, res_ss, prim_ss, sim_bkm)
-
-        # 3. Extract post-burn-in moments from both simulations.
-        burn_in_periods_scaled = sim_ks_scaled.burn
-        # KS moments from the new full solution (post-burn-in)
-        moments_ks_scaled = (
-            K = res_ks_scaled.K_sim_path[(burn_in_periods_scaled+1):end],
-            K_var = res_ks_scaled.K_var_sim_path[(burn_in_periods_scaled+1):end],
-            C = res_ks_scaled.C_sim_path[(burn_in_periods_scaled+1):end],
-            r = res_ks_scaled.r_sim_path[(burn_in_periods_scaled+1):end],
-            w = res_ks_scaled.w_sim_path[(burn_in_periods_scaled+1):end]
-        )
-
-        # BKM moments (now also post-burn-in)
-        moments_bkm_scaled = (
-            K = sim_path_bkm_full_scaled.K[(burn_in_periods_scaled+1):end],
-            K_var = sim_path_bkm_full_scaled.K_var[(burn_in_periods_scaled+1):end],
-            C = sim_path_bkm_full_scaled.C[(burn_in_periods_scaled+1):end],
-            r = sim_path_bkm_full_scaled.r[(burn_in_periods_scaled+1):end],
-            w = sim_path_bkm_full_scaled.w[(burn_in_periods_scaled+1):end]
-        )
-        print_moments_table(moments_ks_scaled, moments_bkm_scaled, shock_scaled)
-    end
-    =#
-        println("\n--- Part 3: Analysis with Scaled-Up Shocks ---")
     if use_level_deviations
         println("Using LEVEL deviations (to test certainty equivalence)")
         # Recompute BKM IRFs in levels
@@ -318,28 +273,15 @@ function main()
         println("Using PERCENT deviations (standard approach)")
         irfs_bkm_levels = irfs_bkm  # Use the percentage-based IRFs
     end
-    #=
-    for shock_scaled in shock_sizes[2:end]
-        println("\n>>> Processing for a $(shock_scaled*100)% TFP shock...")
-
-        # Re-solve KS
-        println("Re-solving with Krusell-Smith...")
-        prim_ks_scaled, sim_ks_scaled, res_ks_scaled = KS.SolveModel(
-            z_grid=[1.0+shock_scaled, 1.0-shock_scaled], 
-            K_min=11.62 - 25*shock_scaled, 
-            K_max=11.62 + 25*shock_scaled
-        )
-    =#
-
 
     for shock_scaled in shock_sizes[2:end]
         println("\n>>> Processing for a $(shock_scaled*100)% TFP shock...")
 
         # Compute the unconditional std dev in log space
         σ_z = shock_scaled #/ sqrt(1 - ρ^2)
-        
-        # Create symmetric grid in LOG space (not level space!)
-        z_grid_scaled = [exp(-σ_z), exp(σ_z)]
+
+        # Create symmetric grid in LOG space (not level space!), good state first as KS expects
+        z_grid_scaled = [exp(σ_z), exp(-σ_z)]
         
         println("  σ_z = $σ_z")
         println("  z_grid = $z_grid_scaled")
